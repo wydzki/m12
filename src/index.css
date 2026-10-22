@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/* Twitter-ish base with a few 4chan accents (greentext, quote links) */
+@theme {
+  --color-page: #ffffff;
+  --color-soft: #f7f9f9;
+  --color-line: #eff3f4;
+  --color-ink: #0f1419;
+  --color-muted: #536471;
+  --color-accent: #1d9bf0;
+  --color-accent-dark: #1a8cd8;
+  --color-ok: #00ba7c;
+  --color-bad: #f4212e;
+  --color-greentext: #789922;
+  --color-maroon: #800000;
+
+  --font-banner: tahoma, verdana, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+@layer base {
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 15px;
+    color: var(--color-ink);
+    background: var(--color-page);
+  }
+
+  input,
+  select,
+  button {
+    font: inherit;
+  }
+}
+
+@layer components {
+  .card {
+    background: #fff;
+    border: 1px solid var(--color-line);
+    border-radius: 16px;
+  }
+
+  .field {
+    width: 100%;
+    border: 1px solid #cfd9de;
+    border-radius: 6px;
+    background: #fff;
+    padding: 10px 12px;
+    color: var(--color-ink);
+    outline: none;
+  }
+  .field:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 1px var(--color-accent);
+  }
+
+  .pill {
+    border-radius: 9999px;
+    font-weight: 700;
+    padding: 8px 18px;
+    cursor: pointer;
+    transition: background-color 0.15s;
+  }
+  .pill-dark {
+    background: var(--color-ink);
+    color: #fff;
+  }
+  .pill-dark:hover {
+    background: #272c30;
+  }
+  .pill-accent {
+    background: var(--color-accent);
+    color: #fff;
+  }
+  .pill-accent:hover {
+    background: var(--color-accent-dark);
+  }
+  .pill-outline {
+    border: 1px solid #cfd9de;
+    color: var(--color-ink);
+  }
+  .pill-outline:hover {
+    background: var(--color-soft);
+  }
+
+  .greentext {
+    color: var(--color-greentext);
+  }
+}

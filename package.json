@@ -1,0 +1,28 @@
+{
+  "name": "m12",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:server": "node --env-file=.env --watch server/index.js",
+    "build": "vite build",
+    "start": "node --env-file=.env server/index.js",
+    "hash-password": "node server/hash-password.js"
+  },
+  "dependencies": {
+    "lucide-react": "^0.460.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.15.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
+    "@vitejs/plugin-react": "^5.2.0",
+    "tailwindcss": "^4.1.14",
+    "vite": "^7.3.7"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}

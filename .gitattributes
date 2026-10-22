@@ -1,0 +1,5 @@
+# Normalize to LF so shell scripts run on Linux regardless of OS
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.woff2 binary

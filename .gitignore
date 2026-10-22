@@ -1,0 +1,17 @@
+node_modules
+dist
+.env
+# private keys / certificates — NEVER commit
+pki/
+*.key
+*.crt
+*.csr
+*.srl
+
+# editor / deploy config (contains the VPS IP + SSH paths)
+.vscode/
+# build artifacts & downloads
+client/m12-agent
+client/mbedtls-*
+*.tar.bz2
+.runtime.env
