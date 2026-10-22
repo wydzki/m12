@@ -8,6 +8,16 @@
 set -e
 cd "$(dirname "$0")"
 
+# 0. Node 20+ required (the server uses --env-file, added in Node 20.6).
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+if [ "$NODE_MAJOR" -lt 20 ]; then
+  echo "error: m12 needs Node.js 20.19+ (found $(node -v 2>/dev/null || echo 'none'))." >&2
+  echo "  Ubuntu's apt ships Node 18 (end-of-life). Install a current LTS:" >&2
+  echo "    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -" >&2
+  echo "    sudo apt-get install -y nodejs" >&2
+  exit 1
+fi
+
 # 1. Secrets must exist. .env is gitignored, so a fresh download won't have one.
 if [ ! -f .env ]; then
   echo "error: .env missing." >&2
