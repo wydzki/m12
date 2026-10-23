@@ -1,0 +1,20 @@
+# m12-agent configuration
+#
+# Copy to m12-agent.conf (next to the binary), or point $M12_CONFIG at it:
+#   M12_CONFIG=/etc/m12/agent.conf /usr/sbin/m12-agent
+#
+# Precedence (later wins): compile-time defaults < this file < environment
+# ($M12_HOST, $M12_PORT, $M12_REGION, $M12_CA, $M12_CERT, $M12_KEY).
+# Lines are "key = value"; '#' starts a comment; unknown keys are ignored.
+
+# Ingest endpoint for this lab deployment.
+host   = ingest.lab.lan
+port   = 8802
+
+# Free-form label reported with telemetry.
+region = homelab
+
+# mTLS material (absolute paths recommended on the device).
+ca   = /etc/m12/ca.crt
+cert = /etc/m12/node.crt
+key  = /etc/m12/node.key

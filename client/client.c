@@ -36,17 +36,50 @@
 
 #include "jsmn.h"
 
-/* ---- configuration (edit host/paths for your deployment) ---- */
-#define SERVER_HOST "ingest.zki.lol"   /* direct, NOT the Cloudflare-proxied name */
+/* ---- configuration ----
+ * The values below are compile-time DEFAULTS. Override any of them without
+ * editing source, in increasing order of precedence:
+ *   1. build-time:  -DSERVER_HOST=\"host\" -DSERVER_PORT=\"8802\" ...
+ *   2. config file: key=value lines (see CONFIG_PATH / $M12_CONFIG)
+ *   3. environment: $M12_HOST, $M12_PORT, $M12_REGION, $M12_CA/$M12_CERT/$M12_KEY
+ * load_config() resolves them at startup; later sources win.
+ */
+#ifndef SERVER_HOST
+#define SERVER_HOST "ingest.zki.lol"
+#endif
+#ifndef SERVER_PORT
 #define SERVER_PORT "8802"
+#endif
+#ifndef NODE_REGION
+#define NODE_REGION "LAN"
+#endif
+#ifndef CA_PATH
+#define CA_PATH   "ca.crt"
+#endif
+#ifndef CERT_PATH
+#define CERT_PATH "node.crt"
+#endif
+#ifndef KEY_PATH
+#define KEY_PATH  "node.key"
+#endif
+/* Default config-file path used when $M12_CONFIG is unset. */
+#ifndef CONFIG_PATH
+#define CONFIG_PATH "m12-agent.conf"
+#endif
+
 #define HTTP_PATH        "/ingest"
 #define HTTP_OUTPUT_PATH "/output"
-#define NODE_REGION "LAN"
-
-#define CA_PATH   "ca.crt"
-#define CERT_PATH "node.crt"
-#define KEY_PATH  "node.key"
 /* ------------------------------------------------------------- */
+
+/* Resolved endpoint/paths, filled by load_config() before any connection. */
+static struct {
+  char host[128];
+  char port[16];
+  char region[32];
+  char ca[256];
+  char cert[256];
+  char key[256];
+} g_cfg;
 
 #define RESP_CAP 16384   /* ingest response (telemetry ack + commands) */
 #define OUT_CAP  8192    /* captured command output (truncated past this) */
@@ -194,9 +227,9 @@ static int setup_tls(void) {
   mbedtls_ssl_config_init(&g_conf);
 
   if ((ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func, &g_entropy, (const unsigned char *)pers, strlen(pers))) != 0) { emit_err("drbg_seed", ret); return -1; }
-  if ((ret = mbedtls_x509_crt_parse_file(&g_cacert, CA_PATH)) != 0) { emit_err("load " CA_PATH, ret); return -1; }
-  if ((ret = mbedtls_x509_crt_parse_file(&g_clicert, CERT_PATH)) != 0) { emit_err("load " CERT_PATH, ret); return -1; }
-  if ((ret = mbedtls_pk_parse_keyfile(&g_pkey, KEY_PATH, NULL, mbedtls_ctr_drbg_random, &g_ctr_drbg)) != 0) { emit_err("load " KEY_PATH, ret); return -1; }
+  if ((ret = mbedtls_x509_crt_parse_file(&g_cacert, g_cfg.ca)) != 0) { emit_err(g_cfg.ca, ret); return -1; }
+  if ((ret = mbedtls_x509_crt_parse_file(&g_clicert, g_cfg.cert)) != 0) { emit_err(g_cfg.cert, ret); return -1; }
+  if ((ret = mbedtls_pk_parse_keyfile(&g_pkey, g_cfg.key, NULL, mbedtls_ctr_drbg_random, &g_ctr_drbg)) != 0) { emit_err(g_cfg.key, ret); return -1; }
   if ((ret = mbedtls_ssl_config_defaults(&g_conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0) { emit_err("config_defaults", ret); return -1; }
   mbedtls_ssl_conf_authmode(&g_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
   mbedtls_ssl_conf_ca_chain(&g_conf, &g_cacert, NULL);
@@ -224,9 +257,9 @@ static int https_request(const char *path, const char *body, char *resp, size_t 
   mbedtls_net_init(&fd);
   mbedtls_ssl_init(&ssl);
 
-  if ((ret = mbedtls_net_connect(&fd, SERVER_HOST, SERVER_PORT, MBEDTLS_NET_PROTO_TCP)) != 0) { emit_err("connect", ret); goto done; }
+  if ((ret = mbedtls_net_connect(&fd, g_cfg.host, g_cfg.port, MBEDTLS_NET_PROTO_TCP)) != 0) { emit_err("connect", ret); goto done; }
   if ((ret = mbedtls_ssl_setup(&ssl, &g_conf)) != 0) { emit_err("ssl_setup", ret); goto done; }
-  if ((ret = mbedtls_ssl_set_hostname(&ssl, SERVER_HOST)) != 0) { emit_err("set_hostname", ret); goto done; }
+  if ((ret = mbedtls_ssl_set_hostname(&ssl, g_cfg.host)) != 0) { emit_err("set_hostname", ret); goto done; }
   mbedtls_ssl_set_bio(&ssl, &fd, mbedtls_net_send, mbedtls_net_recv, NULL);
 
   while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
@@ -236,7 +269,7 @@ static int https_request(const char *path, const char *body, char *resp, size_t 
   int rlen = snprintf(g_req, sizeof(g_req),
                       "POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/json\r\n"
                       "Content-Length: %d\r\nConnection: close\r\n\r\n%s",
-                      path, SERVER_HOST, SERVER_PORT, (int)strlen(body), body);
+                      path, g_cfg.host, g_cfg.port, (int)strlen(body), body);
   if (rlen < 0 || rlen >= (int)sizeof(g_req)) { fprintf(stderr, "request too large\n"); goto notify; }
 
   for (int w = 0; w < rlen; ) {
@@ -328,15 +361,83 @@ static void process_commands(const char *json) {
   }
 }
 
+/* ---------- runtime configuration ---------- */
+
+/* Copy val into dst (bounded, always NUL-terminated). NULL val is a no-op,
+ * so an unset env var / absent key leaves the previous value in place. */
+static void cfg_set(char *dst, size_t cap, const char *val) {
+  if (!val) return;
+  size_t n = strlen(val);
+  if (n >= cap) n = cap - 1;
+  memcpy(dst, val, n);
+  dst[n] = 0;
+}
+
+/* Parse a "key = value" config file. Blank lines and '#' comments are ignored,
+ * as are unknown keys; a missing file is not an error. Recognised keys:
+ *   host, port, region, ca, cert, key */
+static void cfg_load_file(const char *path) {
+  FILE *f = fopen(path, "r");
+  if (!f) return;
+  char line[512];
+  while (fgets(line, sizeof(line), f)) {
+    char *p = line;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p == '#' || *p == '\n' || *p == '\r' || *p == 0) continue;
+    char *eq = strchr(p, '=');
+    if (!eq) continue;
+    char *key = p, *val = eq + 1;
+    char *ke = eq;                                   /* trim trailing key space */
+    while (ke > key && (ke[-1] == ' ' || ke[-1] == '\t')) ke--;
+    *ke = 0;
+    while (*val == ' ' || *val == '\t') val++;       /* trim leading value space */
+    char *ve = val + strlen(val);                    /* trim trailing value ws/nl */
+    while (ve > val && (ve[-1] == '\n' || ve[-1] == '\r' || ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+    *ve = 0;
+
+    if      (!strcmp(key, "host"))   cfg_set(g_cfg.host,   sizeof(g_cfg.host),   val);
+    else if (!strcmp(key, "port"))   cfg_set(g_cfg.port,   sizeof(g_cfg.port),   val);
+    else if (!strcmp(key, "region")) cfg_set(g_cfg.region, sizeof(g_cfg.region), val);
+    else if (!strcmp(key, "ca"))     cfg_set(g_cfg.ca,     sizeof(g_cfg.ca),     val);
+    else if (!strcmp(key, "cert"))   cfg_set(g_cfg.cert,   sizeof(g_cfg.cert),   val);
+    else if (!strcmp(key, "key"))    cfg_set(g_cfg.key,    sizeof(g_cfg.key),    val);
+  }
+  fclose(f);
+}
+
+static void load_config(void) {
+  /* 1. compile-time defaults */
+  cfg_set(g_cfg.host,   sizeof(g_cfg.host),   SERVER_HOST);
+  cfg_set(g_cfg.port,   sizeof(g_cfg.port),   SERVER_PORT);
+  cfg_set(g_cfg.region, sizeof(g_cfg.region), NODE_REGION);
+  cfg_set(g_cfg.ca,     sizeof(g_cfg.ca),     CA_PATH);
+  cfg_set(g_cfg.cert,   sizeof(g_cfg.cert),   CERT_PATH);
+  cfg_set(g_cfg.key,    sizeof(g_cfg.key),    KEY_PATH);
+
+  /* 2. config file: $M12_CONFIG if set, else CONFIG_PATH (silently skipped if absent) */
+  const char *cf = getenv("M12_CONFIG");
+  cfg_load_file(cf && *cf ? cf : CONFIG_PATH);
+
+  /* 3. environment overrides (highest precedence) */
+  cfg_set(g_cfg.host,   sizeof(g_cfg.host),   getenv("M12_HOST"));
+  cfg_set(g_cfg.port,   sizeof(g_cfg.port),   getenv("M12_PORT"));
+  cfg_set(g_cfg.region, sizeof(g_cfg.region), getenv("M12_REGION"));
+  cfg_set(g_cfg.ca,     sizeof(g_cfg.ca),     getenv("M12_CA"));
+  cfg_set(g_cfg.cert,   sizeof(g_cfg.cert),   getenv("M12_CERT"));
+  cfg_set(g_cfg.key,    sizeof(g_cfg.key),    getenv("M12_KEY"));
+}
+
 int main(int argc, char **argv) {
   const char *status = (argc > 1) ? argv[1] : "healthy";
+
+  load_config();
 
   if (setup_tls() != 0) { cleanup_tls(); return 1; }
 
   static char tjson[256];
   snprintf(tjson, sizeof(tjson),
            "{\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
-           status, NODE_REGION, cpu_percent(), mem_percent());
+           status, g_cfg.region, cpu_percent(), mem_percent());
 
   static char resp[RESP_CAP];
   int code = https_request(HTTP_PATH, tjson, resp, sizeof(resp));
