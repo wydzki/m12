@@ -21,4 +21,6 @@ export const api = {
   logout: () => request('/api/logout', { method: 'POST', body: {} }),
   dashboard: () => request('/api/dashboard'),
   features: () => request('/api/features'),
+  nodeExec: (id) => request(`/api/nodes/${encodeURIComponent(id)}/exec`),
+  runCommand: (id, command) => request(`/api/nodes/${encodeURIComponent(id)}/exec`, { method: 'POST', body: { command } }),
 }

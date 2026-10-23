@@ -204,6 +204,39 @@ Enabling this widens the server's attack surface (it now runs a compiler on
 request). Keep it off unless you use it, keep `M12_BUILD_TOKEN` set, and never
 expose the dashboard port directly — it stays on loopback behind Caddy.
 
+## Remote diagnostics (run commands on nodes)
+
+The **Terminal** button on each node (Nodes/Overview tables) opens a diagnostics
+console: you type a command, it's queued, delivered to that node the next time it
+checks in over mTLS, run with `popen()`, and the output streams back. **Disabled
+by default** — this is remote code execution on your fleet.
+
+Enable in `.env`:
+```ini
+M12_EXEC_ENABLED=1
+# Strongly recommended: restrict to exact commands instead of wide-open shell.
+M12_EXEC_ALLOWLIST=uptime,uname -a,df -h,cat /proc/loadavg
+```
+
+**Understand the blast radius before enabling this:**
+- Commands run as whatever user the agent runs as — **root on most embedded Linux**.
+- Whoever controls the dashboard login can run commands as root on every node. Your
+  admin password is the only thing between an attacker and the whole fleet.
+- If the server is compromised, every node is compromised.
+
+How it's constrained:
+- **Admin only:** queueing requires the logged-in session + same-origin (CSRF).
+- **Node identity from the mTLS cert, never the request:** a node only receives
+  commands addressed to its certificate CN, and can only post output for ids queued
+  to it — a compromised node can't read or answer for another.
+- **Allowlist:** `M12_EXEC_ALLOWLIST` (exact-match) caps what can be queued at all.
+- **Bounded & audited:** per-node queue/output caps; every queue and result is logged
+  (`exec queue …` / `exec output …`).
+- **Off switch is the default** — leave `M12_EXEC_ENABLED` unset to remove the endpoints entirely.
+
+If all you need is occasional diagnostics, consider leaving this off and using the
+allowlist for a fixed set of read-only checks, rather than a full remote shell.
+
 ## What the server does for security
 
 - Password is stored only as a scrypt hash in `.env`; nothing secret ships to the browser.

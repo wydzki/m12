@@ -5,6 +5,7 @@ import { NodesTable, DeploymentsTable } from './Tables.jsx'
 import ActivityFeed from './ActivityFeed.jsx'
 import SettingsPanel from './SettingsPanel.jsx'
 import BuildPanel from './BuildPanel.jsx'
+import NodeTerminal from './NodeTerminal.jsx'
 import { WORKSPACES } from '../constants.js'
 import { api } from '../api.js'
 
@@ -15,11 +16,17 @@ export default function Dashboard({ session, onLogout, onExpired }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   const [buildEnabled, setBuildEnabled] = useState(false)
+  const [execEnabled, setExecEnabled] = useState(false)
+  const [terminalNode, setTerminalNode] = useState(null)
 
   useEffect(() => {
     api
       .features()
-      .then((r) => setBuildEnabled(Boolean(r.ok && r.data?.build)))
+      .then((r) => {
+        if (!r.ok) return
+        setBuildEnabled(Boolean(r.data?.build))
+        setExecEnabled(Boolean(r.data?.exec))
+      })
       .catch(() => {})
   }, [])
 
@@ -100,13 +107,15 @@ export default function Dashboard({ session, onLogout, onExpired }) {
                   ))}
                 </div>
                 <TrafficChart traffic={data.traffic} />
-                <NodesTable nodes={filtered} resetKey={query} />
+                <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
               </div>
               <ActivityFeed events={data.events} />
             </div>
           )}
 
-          {data && page === 'nodes' && <NodesTable nodes={filtered} resetKey={query} pageSize={25} showFilters title="All Nodes" />}
+          {data && page === 'nodes' && (
+            <NodesTable nodes={filtered} resetKey={query} pageSize={25} showFilters title="All Nodes" onTerminal={execEnabled ? setTerminalNode : undefined} />
+          )}
 
           {data && page === 'deployments' && (
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4">
@@ -123,6 +132,7 @@ export default function Dashboard({ session, onLogout, onExpired }) {
       </div>
 
       <BottomNav page={page} onPage={setPage} />
+      {terminalNode && <NodeTerminal nodeId={terminalNode} onClose={() => setTerminalNode(null)} />}
     </div>
   )
 }

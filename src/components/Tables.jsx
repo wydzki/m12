@@ -6,7 +6,7 @@ const td = 'px-4 py-3 border-t border-line whitespace-nowrap'
 
 const FILTERS = ['all', 'healthy', 'scanning', 'offline'].map((f) => ({ value: f, label: f[0].toUpperCase() + f.slice(1) }))
 
-export function NodesTable({ nodes, resetKey, pageSize = 5, showFilters = false, title = 'Active Nodes' }) {
+export function NodesTable({ nodes, resetKey, pageSize = 5, showFilters = false, title = 'Active Nodes', onTerminal }) {
   const [page, setPage] = useState(0)
   const [filter, setFilter] = useState('all')
 
@@ -38,6 +38,7 @@ export function NodesTable({ nodes, resetKey, pageSize = 5, showFilters = false,
               <th className={th}>Region</th>
               <th className={th}>Status</th>
               <th className={th}>Last Check-in</th>
+              {onTerminal && <th className={th}></th>}
             </tr>
           </thead>
           <tbody>
@@ -52,11 +53,18 @@ export function NodesTable({ nodes, resetKey, pageSize = 5, showFilters = false,
                   <StatusBadge status={n.status} />
                 </td>
                 <td className={`${td} text-muted`}>{ago(n.lastSeen)}</td>
+                {onTerminal && (
+                  <td className={td}>
+                    <button onClick={() => onTerminal(n.id)} className="pill pill-outline py-1 px-3 text-[13px]">
+                      Terminal
+                    </button>
+                  </td>
+                )}
               </tr>
             ))}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={4} className={`${td} text-center py-10 text-muted`}>
+                <td colSpan={onTerminal ? 5 : 4} className={`${td} text-center py-10 text-muted`}>
                   No nodes match. <span className="greentext">&gt;tfw empty subnet</span>
                 </td>
               </tr>

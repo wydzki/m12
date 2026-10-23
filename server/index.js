@@ -10,6 +10,7 @@ import { buildDashboard, MAX_NODES, DEFAULT_NODES } from './mockData.js'
 import { TelemetryStore } from './telemetryStore.js'
 import { createIngestServer } from './ingest.js'
 import { createBuildHandler, CROSS_RE } from './build.js'
+import { ExecStore } from './execStore.js'
 
 // ---------- config ----------
 
@@ -44,6 +45,10 @@ const config = {
   ingestRevoked: env.INGEST_REVOKED_FILE || null,
   offlineAfterMin: Math.max(1, Number(env.NODE_OFFLINE_AFTER_MIN || 10) || 10),
   demo: env.M12_DEMO !== '0', // show sample fleet until real nodes report; set M12_DEMO=0 to disable
+  // Remote command execution on nodes (diagnostics). OFF unless explicitly enabled.
+  execEnabled: env.M12_EXEC_ENABLED === '1',
+  // Optional: comma-separated exact commands that may be queued. Empty = any command.
+  execAllowlist: (env.M12_EXEC_ALLOWLIST || '').split(',').map((s) => s.trim()).filter(Boolean),
 
   // Build endpoint (compiles the MIPS agent). Off unless explicitly enabled.
   buildEnabled: env.M12_BUILD_ENABLED === '1',
@@ -88,6 +93,8 @@ try {
 // ---------- helpers ----------
 
 const log = (...args) => console.log(new Date().toISOString(), ...args)
+
+const execStore = config.execEnabled ? new ExecStore({ allowlist: new Set(config.execAllowlist), log }) : null
 
 function securityHeaders(res) {
   res.setHeader(
@@ -230,8 +237,34 @@ const routes = {
     if (requireSession(req, res)) json(res, 200, buildDashboard(config.nodeCount, telemetry.list(), config.demo))
   },
   'GET /api/features': (req, res) => {
-    if (requireSession(req, res)) json(res, 200, { build: config.buildEnabled })
+    if (requireSession(req, res)) json(res, 200, { build: config.buildEnabled, exec: config.execEnabled })
   },
+}
+
+const NODE_ID_RE = /^[a-z][a-z0-9-]{1,63}$/
+
+// Remote-diagnostics endpoints (admin side), registered only when enabled.
+// POST /api/nodes/:id/exec  -> queue a command for that node
+// GET  /api/nodes/:id/exec  -> command history + output for the terminal view
+async function execRoute(req, res, nodeId) {
+  const s = requireSession(req, res)
+  if (!s) return
+  if (!NODE_ID_RE.test(nodeId)) return json(res, 400, { error: 'Invalid node id.' })
+
+  if (req.method === 'GET') {
+    return json(res, 200, { node: nodeId, commands: execStore.list(nodeId) })
+  }
+  // POST
+  const body = await readJson(req, res)
+  const command = body?.command
+  if (typeof command !== 'string' || !command.trim() || command.length > 4096) {
+    return json(res, 400, { error: 'command must be a non-empty string (max 4096 chars).' })
+  }
+  if (!execStore.isAllowed(command)) {
+    return json(res, 403, { error: 'Command not in the allowlist (M12_EXEC_ALLOWLIST).' })
+  }
+  const entry = execStore.queue(nodeId, command, s.user)
+  json(res, 202, { id: entry.id, status: entry.status })
 }
 
 // Compiler endpoint, registered only when explicitly enabled.
@@ -251,14 +284,28 @@ if (config.buildEnabled) {
 }
 
 async function handleApi(req, res, pathname) {
+  // POSTs are CSRF-checked and must be JSON (applies to dynamic routes too).
+  const postGuard = () => {
+    if (req.method !== 'POST') return true
+    if (!sameOrigin(req)) return json(res, 403, { error: 'Forbidden.' }), false
+    if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+      return json(res, 415, { error: 'Expected JSON.' }), false
+    }
+    return true
+  }
+
+  // Dynamic: /api/nodes/:id/exec (only when exec is enabled)
+  const execMatch = pathname.match(/^\/api\/nodes\/([^/]+)\/exec$/)
+  if (execMatch) {
+    if (!execStore) return json(res, 404, { error: 'Not found.' })
+    if (req.method !== 'GET' && req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
+    if (!postGuard()) return
+    return execRoute(req, res, decodeURIComponent(execMatch[1]))
+  }
+
   const route = routes[`${req.method} ${pathname}`]
   if (!route) return json(res, 404, { error: 'Not found.' })
-  if (req.method === 'POST') {
-    if (!sameOrigin(req)) return json(res, 403, { error: 'Forbidden.' })
-    if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
-      return json(res, 415, { error: 'Expected JSON.' })
-    }
-  }
+  if (!postGuard()) return
   await route(req, res)
 }
 
@@ -312,6 +359,7 @@ if (ingestFiles === 3) {
       cert: readFileSync(config.ingestCert),
       key: readFileSync(config.ingestKey),
       store: telemetry,
+      execStore,
       revokedFile: config.ingestRevoked,
       log,
     })

@@ -107,7 +107,17 @@ function readBody(req, limit) {
   })
 }
 
-export function createIngestServer({ ca, cert, key, store, revokedFile, log = console.log, bodyLimit = 4096, perNodePerMin = 120 }) {
+// Output a node posts back for a command it ran. id/output/exitCode only.
+function validateOutput(b) {
+  if (typeof b !== 'object' || b === null || Array.isArray(b)) return null
+  if (typeof b.id !== 'string' || b.id.length > 32 || !/^[A-Za-z0-9_-]+$/.test(b.id)) return null
+  if (typeof b.output !== 'string') return null
+  const exitCode = b.exitCode === undefined || b.exitCode === null ? null : b.exitCode
+  if (exitCode !== null && !Number.isInteger(exitCode)) return null
+  return { id: b.id, output: b.output, exitCode }
+}
+
+export function createIngestServer({ ca, cert, key, store, execStore = null, revokedFile, log = console.log, bodyLimit = 4096, perNodePerMin = 120 }) {
   const limiter = new RateLimiter({ limit: perNodePerMin, windowMs: 60_000, maxKeys: 20_000 })
   const revoked = new RevocationList(revokedFile)
 
@@ -139,7 +149,9 @@ export function createIngestServer({ ca, cert, key, store, revokedFile, log = co
           return send(403, { error: 'certificate revoked' })
         }
 
-        if (req.method !== 'POST' || req.url !== '/ingest') return send(404, { error: 'not found' })
+        if (req.method !== 'POST') return send(404, { error: 'not found' })
+        const path = req.url
+        if (path !== '/ingest' && !(execStore && path === '/output')) return send(404, { error: 'not found' })
 
         const wait = limiter.blockedFor(cn)
         if (wait) {
@@ -148,9 +160,11 @@ export function createIngestServer({ ca, cert, key, store, revokedFile, log = co
         }
         limiter.hit(cn)
 
+        // command output can be larger than a telemetry check-in
+        const limit = path === '/output' ? 128 * 1024 : bodyLimit
         let body
         try {
-          body = await readBody(req, bodyLimit)
+          body = await readBody(req, limit)
         } catch (e) {
           if (e.status === 413) {
             res.setHeader('Connection', 'close')
@@ -159,11 +173,21 @@ export function createIngestServer({ ca, cert, key, store, revokedFile, log = co
           return send(400, { error: 'invalid JSON' })
         }
 
+        if (path === '/output') {
+          const out = validateOutput(body)
+          if (!out) return send(422, { error: 'invalid output' })
+          // A node can only answer command ids queued for its own cert CN.
+          const ok = execStore.recordOutput(cn, out.id, out.output, out.exitCode)
+          return send(ok ? 200 : 404, ok ? { ok: true } : { error: 'unknown command id for this node' })
+        }
+
         const telemetry = validateTelemetry(body)
         if (!telemetry) return send(422, { error: 'invalid telemetry' })
 
         store.record(cn, telemetry, req.socket.remoteAddress)
-        send(200, { ok: true, node: cn })
+        // Deliver any commands queued for this node (it will run them and POST /output).
+        const commands = execStore ? execStore.takePending(cn) : []
+        send(200, { ok: true, node: cn, commands })
       } catch (err) {
         log('ingest error', err?.message || err)
         if (!res.headersSent) send(500, { error: 'internal error' })
