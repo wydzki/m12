@@ -42,7 +42,7 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
   )
 }
 
-export function Sidebar({ page, onPage, nodes, subnet, live }) {
+export function Sidebar({ page, onPage, nodes, subnet, live, demo }) {
   const count = (s) => nodes.filter((n) => n.status === s).length
 
   return (
@@ -77,10 +77,16 @@ export function Sidebar({ page, onPage, nodes, subnet, live }) {
               className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
                 live ? 'text-ok bg-ok/10' : 'text-muted bg-line'
               }`}
-              title={live ? 'Receiving telemetry from mTLS-authenticated nodes' : 'No nodes connected — showing demo data'}
+              title={
+                live
+                  ? 'Receiving telemetry from mTLS-authenticated nodes'
+                  : demo
+                    ? 'No nodes connected — showing sample data'
+                    : 'No nodes connected yet'
+              }
             >
               <span className={`size-1.5 rounded-full bg-current ${live ? 'animate-pulse' : ''}`} />
-              {live ? 'LIVE' : 'DEMO'}
+              {live ? 'LIVE' : demo ? 'DEMO' : 'NO NODES'}
             </span>
           </div>
           <div className="flex justify-between text-muted">

@@ -119,12 +119,35 @@ function liveActivity(nodes) {
     })
 }
 
+// Flat zero series for the "no nodes yet" state.
+const flat = (n = 24) => Array.from({ length: n }, (_, i) => ({ i, v: 0 }))
+
+function emptyDashboard(now) {
+  const metrics = [
+    { key: 'instances', label: 'Active Instances', value: '0', unit: 'nodes', note: '>waiting for first check-in', tone: 'good', spark: flat() },
+    { key: 'latency', label: 'Network Latency', value: '—', unit: 'ms p50', note: '>no data yet', tone: 'good', spark: flat() },
+    { key: 'deploys', label: 'Deployment Status', value: '—', unit: '', note: '>no deploys yet', tone: 'good', spark: flat() },
+    { key: 'errors', label: 'Error Rate', value: '0', unit: '%', note: '>no nodes reporting', tone: 'good', spark: flat() },
+  ]
+  const zero = (n, label) => Array.from({ length: n }, (_, i) => ({ t: label(i), inbound: 0, outbound: 0 }))
+  const traffic = {
+    '1h': zero(12, (i) => `-${55 - i * 5}m`),
+    '24h': zero(24, (i) => `${pad(i)}:00`),
+    '7d': zero(7, (i) => DAYS[(new Date(now).getDay() + i + 1) % 7]),
+  }
+  return { subnet: '—', live: false, demo: false, total: 0, nodes: [], events: [], deployments: [], metrics, traffic }
+}
+
 // count: size of the demo fleet when no live data. liveNodes: real telemetry
 // (from the mTLS ingest store) which, when present, becomes the fleet.
-export function buildDashboard(count = DEFAULT_NODES, liveNodes = null) {
+// demo: when false and no nodes have reported, show an empty dashboard instead
+// of the sample fleet.
+export function buildDashboard(count = DEFAULT_NODES, liveNodes = null, demo = true) {
   const now = Date.now()
   const minsAgo = (m) => now - m * MIN
   const live = Array.isArray(liveNodes) && liveNodes.length > 0
+
+  if (!live && !demo) return emptyDashboard(now)
 
   const nodes = live ? liveNodes.slice(0, MAX_NODES) : makeNodes(Math.max(1, Math.min(MAX_NODES, count | 0)), now)
   const total = nodes.length
@@ -148,5 +171,5 @@ export function buildDashboard(count = DEFAULT_NODES, liveNodes = null) {
     '7d': trafficSeries(303, 7, (i) => DAYS[(new Date(now).getDay() + i + 1) % 7]),
   }
 
-  return { subnet: live ? 'live' : SUBNET, live, total, nodes, events, deployments, metrics, traffic }
+  return { subnet: live ? 'live' : SUBNET, live, demo: !live, total, nodes, events, deployments, metrics, traffic }
 }

@@ -43,6 +43,8 @@ const config = {
   ingestKey: env.INGEST_KEY_FILE,
   ingestRevoked: env.INGEST_REVOKED_FILE || null,
   offlineAfterMin: Math.max(1, Number(env.NODE_OFFLINE_AFTER_MIN || 10) || 10),
+  demo: env.M12_DEMO !== '0', // show sample fleet until real nodes report; set M12_DEMO=0 to disable
+
   // Build endpoint (compiles the MIPS agent). Off unless explicitly enabled.
   buildEnabled: env.M12_BUILD_ENABLED === '1',
   buildCross: env.M12_BUILD_CROSS || 'mips-linux-gnu-',
@@ -225,7 +227,7 @@ const routes = {
     if (s) json(res, 200, { user: s.user })
   },
   'GET /api/dashboard': (req, res) => {
-    if (requireSession(req, res)) json(res, 200, buildDashboard(config.nodeCount, telemetry.list()))
+    if (requireSession(req, res)) json(res, 200, buildDashboard(config.nodeCount, telemetry.list(), config.demo))
   },
   'GET /api/features': (req, res) => {
     if (requireSession(req, res)) json(res, 200, { build: config.buildEnabled })

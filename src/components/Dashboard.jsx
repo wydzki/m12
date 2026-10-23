@@ -73,11 +73,23 @@ export default function Dashboard({ session, onLogout, onExpired }) {
       />
 
       <div className="flex gap-6 px-4 py-5 max-w-[1400px] mx-auto">
-        <Sidebar page={page} onPage={setPage} nodes={nodes ?? []} subnet={data?.subnet} live={data?.live} />
+        <Sidebar page={page} onPage={setPage} nodes={nodes ?? []} subnet={data?.subnet} live={data?.live} demo={data?.demo} />
 
         <main className="flex-1 min-w-0 space-y-4">
           {error && <div className="card px-4 py-3 text-bad text-[14px]">{error}</div>}
           {!data && !error && <div className="card px-4 py-10 text-center text-muted">Loading…</div>}
+          {data && data.total === 0 && (
+            <div className="card px-4 py-3 text-[14px]">
+              <span className="font-semibold">No nodes connected yet.</span>{' '}
+              <span className="text-muted">Deploy an agent with a valid client certificate and it'll appear here as it checks in over mTLS.</span>
+            </div>
+          )}
+          {data && data.demo && (
+            <div className="card px-4 py-3 text-[14px]">
+              <span className="font-semibold">Showing sample data.</span>{' '}
+              <span className="text-muted">No real nodes have reported yet — this is a demo fleet. Set <code className="font-mono">M12_DEMO=0</code> to hide it.</span>
+            </div>
+          )}
 
           {data && page === 'overview' && (
             <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4">

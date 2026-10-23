@@ -31,6 +31,7 @@ export default function ActivityFeed({ events, limit }) {
           <span className="size-2 rounded-full bg-ok animate-pulse" /> Live
         </span>
       </div>
+      {list.length === 0 && <p className="px-4 py-6 text-center text-muted text-[14px]">No activity yet.</p>}
       <ol>
         {list.map((e, i) => {
           const { icon: Icon, cls } = KIND[e.kind]
