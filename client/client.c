@@ -27,7 +27,11 @@
 #include <dirent.h>
 #include <sys/wait.h>
 
-#include "mbedtls/net_sockets.h"
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <unistd.h>
+
 #include "mbedtls/ssl.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
@@ -255,8 +259,7 @@ static int setup_tls(void) {
   if ((ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func, &g_entropy, (const unsigned char *)pers, strlen(pers))) != 0) { emit_err("drbg_seed", ret); return -1; }
   /* --- CA (trust anchor) --- */
 #if defined(EMBED_CERTS) || defined(EMBED_CA)
-  /* CA is compiled in (shared across the fleet, not secret). PEM buffers passed
-   * to mbedTLS must include the trailing NUL; the generated *_len counts it. */
+  /* CA compiled in as DER. mbedtls_x509_crt_parse auto-detects DER vs PEM. */
   if ((ret = mbedtls_x509_crt_parse(&g_cacert, embedded_ca, embedded_ca_len)) != 0) { emit_err("embedded ca", ret); return -1; }
 #else
   if ((ret = mbedtls_x509_crt_parse_file(&g_cacert, g_cfg.ca)) != 0) { emit_err(g_cfg.ca, ret); return -1; }
@@ -264,13 +267,11 @@ static int setup_tls(void) {
 
   /* --- this node's cert + key (its identity) --- */
 #if defined(EMBED_CERTS)
-  /* Fully standalone, per-node binary: cert + key compiled in too. */
+  /* DER byte arrays compiled in — no PEM/Base64/FS_IO needed. */
   if ((ret = mbedtls_x509_crt_parse(&g_clicert, embedded_cert, embedded_cert_len)) != 0) { emit_err("embedded cert", ret); return -1; }
   if ((ret = mbedtls_pk_parse_key(&g_pkey, embedded_key, embedded_key_len, NULL, 0, mbedtls_ctr_drbg_random, &g_ctr_drbg)) != 0) { emit_err("embedded key", ret); return -1; }
 #else
-  /* From disk. A non-empty identity path is one PEM file holding BOTH the cert
-   * and the key (fleet flow: identical binary + one per-node node.pem); else the
-   * classic two files. crt_parse reads the CERTIFICATE block, pk_parse the key. */
+  /* From disk (requires stock mbedTLS config with FS_IO + PEM_PARSE_C). */
   const char *cert_src = g_cfg.identity[0] ? g_cfg.identity : g_cfg.cert;
   const char *key_src  = g_cfg.identity[0] ? g_cfg.identity : g_cfg.key;
   if ((ret = mbedtls_x509_crt_parse_file(&g_clicert, cert_src)) != 0) { emit_err(cert_src, ret); return -1; }
@@ -294,19 +295,47 @@ static void cleanup_tls(void) {
   mbedtls_entropy_free(&g_entropy);
 }
 
+/* --- inline POSIX socket I/O callbacks for mbedtls_ssl_set_bio --- */
+
+static int net_send(void *ctx, const unsigned char *buf, size_t len) {
+  ssize_t r = send(*(int *)ctx, buf, len, 0);
+  if (r < 0) return (errno == EAGAIN || errno == EINTR) ? MBEDTLS_ERR_SSL_WANT_WRITE : -1;
+  return (int)r;
+}
+
+static int net_recv(void *ctx, unsigned char *buf, size_t len) {
+  ssize_t r = recv(*(int *)ctx, buf, len, 0);
+  if (r < 0) return (errno == EAGAIN || errno == EINTR) ? MBEDTLS_ERR_SSL_WANT_READ : -1;
+  return (int)r;
+}
+
+static int tcp_connect(const char *host, const char *port) {
+  struct addrinfo hints = { .ai_socktype = SOCK_STREAM }, *res, *rp;
+  if (getaddrinfo(host, port, &hints, &res) != 0) return -1;
+  int fd = -1;
+  for (rp = res; rp; rp = rp->ai_next) {
+    fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    if (fd < 0) continue;
+    if (connect(fd, rp->ai_addr, rp->ai_addrlen) == 0) break;
+    close(fd); fd = -1;
+  }
+  freeaddrinfo(res);
+  return fd;
+}
+
 /* One request/response over a fresh mTLS connection. Returns the HTTP status
  * code (resp holds the full response, NUL-terminated), or -1 on failure. */
 static int https_request(const char *path, const char *body, char *resp, size_t resp_cap) {
   int ret, status = -1;
-  mbedtls_net_context fd;
+  int fd = -1;
   mbedtls_ssl_context ssl;
-  mbedtls_net_init(&fd);
   mbedtls_ssl_init(&ssl);
 
-  if ((ret = mbedtls_net_connect(&fd, g_cfg.host, g_cfg.port, MBEDTLS_NET_PROTO_TCP)) != 0) { emit_err("connect", ret); goto done; }
+  fd = tcp_connect(g_cfg.host, g_cfg.port);
+  if (fd < 0) { fprintf(stderr, "connect: %s:%s: %s\n", g_cfg.host, g_cfg.port, strerror(errno)); goto done; }
   if ((ret = mbedtls_ssl_setup(&ssl, &g_conf)) != 0) { emit_err("ssl_setup", ret); goto done; }
   if ((ret = mbedtls_ssl_set_hostname(&ssl, g_cfg.host)) != 0) { emit_err("set_hostname", ret); goto done; }
-  mbedtls_ssl_set_bio(&ssl, &fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+  mbedtls_ssl_set_bio(&ssl, &fd, net_send, net_recv, NULL);
 
   while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) { emit_err("handshake", ret); goto done; }
@@ -341,7 +370,7 @@ notify:
   mbedtls_ssl_close_notify(&ssl);
 done:
   mbedtls_ssl_free(&ssl);
-  mbedtls_net_free(&fd);
+  if (fd >= 0) close(fd);
   return status;
 }
 
