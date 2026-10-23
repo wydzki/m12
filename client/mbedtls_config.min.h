@@ -53,8 +53,8 @@
 
 /* ---- hash: SHA-256 only (PRF, HMAC, cert sigs, entropy accumulator) ---- */
 #define MBEDTLS_MD_C
-#define MBEDTLS_SHA224_C             /* paired with SHA256 in the SHA-256 module */
 #define MBEDTLS_SHA256_C
+/* SHA-224 omitted: we only use SHA-256. */
 
 /* ---- public key: EC only, P-256 only ---- */
 #define MBEDTLS_BIGNUM_C
@@ -79,17 +79,19 @@
 #define MBEDTLS_SSL_CLI_C
 #define MBEDTLS_SSL_PROTO_TLS1_2
 #define MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED
-#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE
+/* SSL_KEEP_PEER_CERTIFICATE omitted: the agent never inspects the
+ * server cert after the handshake, so drop the storage + code. */
 
 /* Keep mbedtls_strerror() linkable without the multi-KB string tables that
  * MBEDTLS_ERROR_C would pull in (the agent calls it in emit_err()). */
 #define MBEDTLS_ERROR_STRERROR_DUMMY
 
 /* ---- size tuning ---- */
-#define MBEDTLS_SSL_IN_CONTENT_LEN   4096   /* tiny payloads; default is 16 KB */
-#define MBEDTLS_SSL_OUT_CONTENT_LEN  4096
+#define MBEDTLS_SSL_IN_CONTENT_LEN   2048   /* EC cert chain ~1KB; default 16KB */
+#define MBEDTLS_SSL_OUT_CONTENT_LEN  2048   /* agent payloads are tiny JSON     */
 #define MBEDTLS_AES_ONLY_128_BIT_KEY_LENGTH /* drop AES-192/256 code + tables  */
 #define MBEDTLS_AES_FEWER_TABLES            /* smaller AES tables, slightly slower */
+#define MBEDTLS_AES_ROM_TABLES              /* const S-boxes in .rodata, no init */
 #define MBEDTLS_SHA256_SMALLER              /* smaller SHA-256 core            */
 #define MBEDTLS_ECP_NIST_OPTIM              /* compact + fast for NIST curves  */
 #define MBEDTLS_ECP_WINDOW_SIZE      2      /* smallest precompute window      */

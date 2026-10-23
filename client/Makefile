@@ -1,7 +1,8 @@
 # m12 MIPS/ARM telemetry agent — fetch mbedTLS, build it, and link the agent.
 #
-#   make                 fresh big-endian MIPS musl build + arch verify (DEFAULT)
+#   make                 fresh big-endian MIPS musl build + arch verify + gzip (DEFAULT)
 #   make quick           incremental build (reuse mbedTLS lib if already built)
+#   make gz              gzip the binary (for TFTP on high-latency links)
 #   make clean           remove the agent binary
 #   make distclean       also remove the mbedTLS tree and tarball
 #
@@ -73,6 +74,10 @@ MBEDTLS_CFLAGS   = -Os $(ARCHFLAGS) -ffunction-sections -fdata-sections
 # default #include "mbedtls/mbedtls_config.h" path — no -D flag, no quoting.
 ifdef MINIMAL_TLS
 TLS_CONFIG      := mbedtls_config.min.h
+# Also compile the library with LTO + all the same stripping flags so the linker
+# can do function-level DCE across mbedTLS, not just section-level GC.
+MBEDTLS_CFLAGS  += -flto -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                   -fno-stack-protector -fno-ident
 else
 # When using the stock config (16 KB default buffers), shrink to 4 KB for the
 # tiny payloads on these devices. The minimal config already defines these.
@@ -120,16 +125,18 @@ endif
 # toolchain throws LTO link errors. Unwind/stack-protector tables are dead weight
 # on a tiny single-shot agent.
 SIZEFLAGS        = $(ARCHFLAGS) -flto -fno-stack-protector \
-                   -fno-asynchronous-unwind-tables -fno-unwind-tables -fomit-frame-pointer
+                   -fno-asynchronous-unwind-tables -fno-unwind-tables \
+                   -fomit-frame-pointer -fno-ident
 
 CFLAGS          ?= -Os -ffunction-sections -fdata-sections
 AGENT_CFLAGS     = $(CFLAGS) $(SIZEFLAGS) $(AGENT_CPPFLAGS)
-LDFLAGS          = -static -flto -Wl,--gc-sections -Wl,--as-needed -s
+LDFLAGS          = -static -flto -Wl,--gc-sections -Wl,--as-needed \
+                   -Wl,--build-id=none -s
 LIBS             = -lmbedtls -lmbedx509 -lmbedcrypto
 
 BIN              = m12-agent
 
-.PHONY: all fresh quick verify mbedtls clean distclean
+.PHONY: all fresh quick verify mbedtls gz clean distclean
 
 # Default: a guaranteed-fresh MIPS batch. Remove the old binary, discard any
 # previously-built mbedTLS objects (keeping the downloaded source, so no network
@@ -139,11 +146,12 @@ BIN              = m12-agent
 all: fresh
 
 fresh:
-	rm -f $(BIN)
+	rm -f $(BIN) $(BIN).gz
 	@test ! -d "$(MBEDTLS)" || $(MAKE) -C "$(MBEDTLS)" clean   # drop wrong-arch objects, keep sources
 	rm -f $(MBEDTLS_LIB)
 	@$(MAKE) --no-print-directory quick
 	@$(MAKE) --no-print-directory verify
+	@$(MAKE) --no-print-directory gz
 
 # Incremental: build the agent, reusing the mbedTLS lib if it is already current.
 # Faster, but trusts the existing lib — use `make`/`make fresh` when in doubt.
@@ -198,8 +206,14 @@ $(MBEDTLS_LIB):
 	}
 	$(MAKE) -C "$(MBEDTLS)" CC=$(CC) AR=$(AR) CFLAGS="$(MBEDTLS_CFLAGS)" lib
 
+# Gzip the binary for high-latency TFTP. Decompress on the router:
+#   busybox gunzip m12-agent.gz && chmod +x m12-agent
+gz: $(BIN)
+	gzip -9kf $(BIN)
+	@printf 'compressed  '; ls -l $(BIN).gz | awk '{printf "%s (%d bytes)\n", $$5, $$5}'
+
 clean:
-	rm -f $(BIN) $(EMBED_HDR)   # drop the generated header too (it holds a key)
+	rm -f $(BIN) $(BIN).gz $(EMBED_HDR)
 
 distclean: clean
 	rm -rf "$(MBEDTLS)" "$(MBEDTLS_TARBALL)"
