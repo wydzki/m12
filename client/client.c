@@ -57,7 +57,7 @@
 #define SERVER_HOST "ingest.zki.lol"
 #endif
 #ifndef SERVER_PORT
-#define SERVER_PORT "8802"
+#define SERVER_PORT "8443"
 #endif
 #ifndef NODE_REGION
 #define NODE_REGION "LAN"
