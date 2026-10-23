@@ -24,7 +24,7 @@ export default function App() {
 
   if (session === undefined) {
     return (
-      <div className="min-h-screen grid place-items-center">
+      <div className="min-h-screen bg-page grid place-items-center">
         <Logo size="md" />
       </div>
     )

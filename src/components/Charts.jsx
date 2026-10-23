@@ -5,29 +5,30 @@ import { Segmented } from './ui.jsx'
 
 const ICONS = { instances: Activity, latency: Timer, deploys: PackageCheck, errors: AlertTriangle }
 
-const BLUE = '#1d9bf0'
-const GREEN = '#00ba7c'
-const RED = '#f4212e'
-const MUTED = '#536471'
+const GREEN = '#39c583'
+const BLUE = '#4da6e8'
+const RED = '#e5534b'
+const MUTED = '#6b7a8d'
+const GRID = '#252b38'
 
 export function MetricCard({ metric }) {
   const Icon = ICONS[metric.key]
   const bad = metric.tone === 'bad'
   return (
-    <div className="card p-4 flex flex-col min-w-0">
-      <div className="flex items-center gap-2 text-[14px] text-muted">
-        <Icon className="size-4" />
+    <div className="card p-3 flex flex-col min-w-0 stat-glow">
+      <div className="flex items-center gap-2 text-[11px] text-muted font-mono uppercase tracking-wider">
+        <Icon className="size-3.5" />
         <span className="truncate">{metric.label}</span>
       </div>
       <div className="mt-2 flex items-baseline gap-1.5">
-        <span className="text-[30px] font-bold leading-none tracking-tight">{metric.value}</span>
-        <span className="text-[14px] text-muted">{metric.unit}</span>
+        <span className={`text-[28px] font-mono font-bold leading-none tracking-tight ${bad ? 'text-bad' : 'text-bright'}`}>{metric.value}</span>
+        <span className="text-[12px] text-muted font-mono">{metric.unit}</span>
       </div>
-      <p className={`text-[13px] mt-1 ${bad ? 'text-bad' : 'greentext'}`}>{metric.note}</p>
-      <div className="h-10 mt-2 -mx-1">
+      <p className={`text-[11px] font-mono mt-1 ${bad ? 'text-bad' : 'text-accent'}`}>{metric.note}</p>
+      <div className="h-8 mt-2 -mx-1">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={metric.spark}>
-            <Line type="monotone" dataKey="v" stroke={bad ? RED : BLUE} strokeWidth={2} dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="v" stroke={bad ? RED : GREEN} strokeWidth={1.5} dot={false} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -38,13 +39,13 @@ export function MetricCard({ metric }) {
 function ChartTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
   return (
-    <div className="card px-3 py-2 text-[13px] shadow-lg">
-      <div className="font-bold mb-0.5">{label}</div>
+    <div className="card px-3 py-2 text-[12px] font-mono shadow-lg border border-line">
+      <div className="font-semibold text-bright mb-1">{label}</div>
       {payload.map((p) => (
         <div key={p.dataKey} className="flex items-center gap-2">
           <span className="size-2 rounded-full" style={{ background: p.stroke }} />
-          <span className="text-muted capitalize">{p.dataKey}</span>
-          <span className="ml-auto font-semibold">{p.value} Mbps</span>
+          <span className="text-muted">{p.dataKey}</span>
+          <span className="ml-auto text-ink">{p.value}</span>
         </div>
       ))}
     </div>
@@ -58,13 +59,13 @@ export function TrafficChart({ traffic }) {
   return (
     <div className="card p-4">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <h2 className="font-bold text-[17px]">Network Traffic</h2>
-        <div className="flex gap-3 text-[13px] text-muted">
+        <h2 className="font-mono font-semibold text-[13px] text-bright uppercase tracking-wider">Traffic</h2>
+        <div className="flex gap-3 text-[11px] font-mono text-muted">
           <span className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full" style={{ background: BLUE }} /> Inbound
+            <span className="size-2 rounded-full" style={{ background: BLUE }} /> in
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full" style={{ background: GREEN }} /> Outbound
+            <span className="size-2 rounded-full" style={{ background: GREEN }} /> out
           </span>
         </div>
         <div className="ml-auto">
@@ -72,25 +73,25 @@ export function TrafficChart({ traffic }) {
         </div>
       </div>
 
-      <div className="h-56 sm:h-64 mt-4">
+      <div className="h-48 sm:h-56 mt-3">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 4, right: 8, left: -12, bottom: 0 }}>
+          <AreaChart data={data} margin={{ top: 4, right: 8, left: -16, bottom: 0 }}>
             <defs>
               <linearGradient id="fillIn" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={BLUE} stopOpacity={0.2} />
+                <stop offset="0%" stopColor={BLUE} stopOpacity={0.15} />
                 <stop offset="100%" stopColor={BLUE} stopOpacity={0} />
               </linearGradient>
               <linearGradient id="fillOut" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor={GREEN} stopOpacity={0.2} />
+                <stop offset="0%" stopColor={GREEN} stopOpacity={0.15} />
                 <stop offset="100%" stopColor={GREEN} stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid stroke="#eff3f4" vertical={false} />
-            <XAxis dataKey="t" tick={{ fill: MUTED, fontSize: 12 }} tickLine={false} axisLine={false} minTickGap={16} />
-            <YAxis tick={{ fill: MUTED, fontSize: 12 }} tickLine={false} axisLine={false} unit="M" width={48} />
-            <Tooltip content={<ChartTooltip />} cursor={{ stroke: '#cfd9de' }} />
-            <Area type="monotone" dataKey="inbound" stroke={BLUE} strokeWidth={2} fill="url(#fillIn)" />
-            <Area type="monotone" dataKey="outbound" stroke={GREEN} strokeWidth={2} fill="url(#fillOut)" />
+            <CartesianGrid stroke={GRID} vertical={false} />
+            <XAxis dataKey="t" tick={{ fill: MUTED, fontSize: 11, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} minTickGap={16} />
+            <YAxis tick={{ fill: MUTED, fontSize: 11, fontFamily: 'var(--font-mono)' }} tickLine={false} axisLine={false} width={40} />
+            <Tooltip content={<ChartTooltip />} cursor={{ stroke: GRID }} />
+            <Area type="monotone" dataKey="inbound" stroke={BLUE} strokeWidth={1.5} fill="url(#fillIn)" />
+            <Area type="monotone" dataKey="outbound" stroke={GREEN} strokeWidth={1.5} fill="url(#fillOut)" />
           </AreaChart>
         </ResponsiveContainer>
       </div>

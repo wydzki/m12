@@ -1,90 +1,126 @@
 @import "tailwindcss";
 
-/* Twitter-ish base with a few 4chan accents (greentext, quote links) */
 @theme {
-  --color-page: #ffffff;
-  --color-soft: #f7f9f9;
-  --color-line: #eff3f4;
-  --color-ink: #0f1419;
-  --color-muted: #536471;
-  --color-accent: #1d9bf0;
-  --color-accent-dark: #1a8cd8;
-  --color-ok: #00ba7c;
-  --color-bad: #f4212e;
-  --color-greentext: #789922;
-  --color-maroon: #800000;
+  --color-page: #0a0e14;
+  --color-surface: #11151c;
+  --color-raised: #1a1f2b;
+  --color-line: #252b38;
+  --color-ink: #c5cdd8;
+  --color-bright: #e8ecf1;
+  --color-muted: #6b7a8d;
+  --color-accent: #39c583;
+  --color-accent-dim: #2a9e69;
+  --color-ok: #39c583;
+  --color-warn: #e6a835;
+  --color-bad: #e5534b;
+  --color-blue: #4da6e8;
+  --color-maroon: #e5534b;
 
-  --font-banner: tahoma, verdana, sans-serif;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-banner: var(--font-mono);
 }
 
 @layer base {
   body {
     margin: 0;
     font-family: var(--font-sans);
-    font-size: 15px;
+    font-size: 14px;
     color: var(--color-ink);
     background: var(--color-page);
+    -webkit-font-smoothing: antialiased;
   }
 
-  input,
-  select,
-  button {
-    font: inherit;
-  }
+  input, select, button { font: inherit; }
+
+  ::selection { background: rgba(57, 197, 131, 0.25); }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--color-muted); }
 }
 
 @layer components {
   .card {
-    background: #fff;
+    background: var(--color-surface);
     border: 1px solid var(--color-line);
-    border-radius: 16px;
+    border-radius: 6px;
   }
 
   .field {
     width: 100%;
-    border: 1px solid #cfd9de;
-    border-radius: 6px;
-    background: #fff;
-    padding: 10px 12px;
+    border: 1px solid var(--color-line);
+    border-radius: 4px;
+    background: var(--color-page);
+    padding: 8px 10px;
     color: var(--color-ink);
     outline: none;
+    font-family: var(--font-mono);
+    font-size: 13px;
   }
   .field:focus {
     border-color: var(--color-accent);
-    box-shadow: 0 0 0 1px var(--color-accent);
+    box-shadow: 0 0 0 1px rgba(57, 197, 131, 0.3);
   }
+  .field::placeholder { color: var(--color-muted); }
 
-  .pill {
-    border-radius: 9999px;
-    font-weight: 700;
-    padding: 8px 18px;
+  .btn {
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 7px 14px;
     cursor: pointer;
-    transition: background-color 0.15s;
+    transition: all 0.1s;
+    border: 1px solid transparent;
   }
-  .pill-dark {
-    background: var(--color-ink);
-    color: #fff;
-  }
-  .pill-dark:hover {
-    background: #272c30;
-  }
-  .pill-accent {
+  .btn-primary {
     background: var(--color-accent);
-    color: #fff;
+    color: var(--color-page);
   }
-  .pill-accent:hover {
-    background: var(--color-accent-dark);
-  }
-  .pill-outline {
-    border: 1px solid #cfd9de;
+  .btn-primary:hover { background: var(--color-accent-dim); }
+  .btn-ghost {
+    background: transparent;
+    border-color: var(--color-line);
     color: var(--color-ink);
   }
-  .pill-outline:hover {
-    background: var(--color-soft);
+  .btn-ghost:hover { background: var(--color-raised); }
+  .btn-danger {
+    background: var(--color-bad);
+    color: #fff;
   }
+  .btn-danger:hover { opacity: 0.85; }
 
-  .greentext {
-    color: var(--color-greentext);
+  .pill {
+    border-radius: 4px;
+    font-weight: 600;
+    font-size: 13px;
+    padding: 7px 14px;
+    cursor: pointer;
+    transition: all 0.1s;
+    border: 1px solid transparent;
+  }
+  .pill-dark {
+    background: transparent;
+    border-color: var(--color-line);
+    color: var(--color-ink);
+  }
+  .pill-dark:hover { background: var(--color-raised); }
+  .pill-accent {
+    background: var(--color-accent);
+    color: var(--color-page);
+  }
+  .pill-accent:hover { background: var(--color-accent-dim); }
+  .pill-outline {
+    background: transparent;
+    border-color: var(--color-line);
+    color: var(--color-ink);
+  }
+  .pill-outline:hover { background: var(--color-raised); }
+
+  .greentext { color: var(--color-accent); }
+
+  .stat-glow {
+    box-shadow: inset 0 1px 0 rgba(57, 197, 131, 0.06);
   }
 }

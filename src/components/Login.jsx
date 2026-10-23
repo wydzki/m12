@@ -20,12 +20,12 @@ export default function Login({ onLogin }) {
       if (r.ok) return onLogin({ name: r.data.user, workspace })
       if (r.status === 429) {
         const mins = Math.max(1, Math.ceil((r.data?.retryAfter ?? 60) / 60))
-        setError(`Too many attempts. Try again in ${mins} min.`)
+        setError(`rate limited. retry in ${mins}m.`)
       } else {
-        setError(r.data?.error || 'Sign in failed.')
+        setError(r.data?.error || 'auth failed.')
       }
     } catch {
-      setError('Could not reach the server.')
+      setError('connection failed.')
     } finally {
       setPassword('')
       setBusy(false)
@@ -38,23 +38,26 @@ export default function Login({ onLogin }) {
   }
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col bg-page">
       <div className="flex-1 grid lg:grid-cols-2">
-        <div className="hidden lg:grid place-items-center">
-          <Logo size="xl" tagline />
+        <div className="hidden lg:grid place-items-center bg-surface border-r border-line">
+          <div className="text-center">
+            <Logo size="xl" tagline />
+            <div className="mt-4 font-mono text-[12px] text-muted">mTLS fleet management</div>
+          </div>
         </div>
 
-        <main className="flex flex-col justify-center px-6 py-12 max-w-lg w-full mx-auto lg:mx-0">
-          <div className="lg:hidden mb-8">
+        <main className="flex flex-col justify-center px-6 py-12 max-w-sm w-full mx-auto">
+          <div className="lg:hidden mb-6">
             <Logo size="md" tagline />
           </div>
-          <h1 className="text-4xl sm:text-6xl font-black tracking-tight leading-tight">Watching your network now</h1>
-          <h2 className="text-2xl sm:text-3xl font-bold mt-8 mb-6">Sign in to m12.</h2>
 
-          <form onSubmit={submit} className="space-y-3 max-w-sm">
+          <h1 className="font-mono text-[13px] text-muted uppercase tracking-wider mb-6">authenticate</h1>
+
+          <form onSubmit={submit} className="space-y-3">
             <input
               className="field"
-              placeholder="Username"
+              placeholder="username"
               value={name}
               onChange={clearError(setName)}
               autoComplete="username"
@@ -64,7 +67,7 @@ export default function Login({ onLogin }) {
             <input
               type="password"
               className="field"
-              placeholder="Password"
+              placeholder="password"
               value={password}
               onChange={clearError(setPassword)}
               autoComplete="current-password"
@@ -79,26 +82,14 @@ export default function Login({ onLogin }) {
               ))}
             </select>
 
-            {error && <p className="text-bad text-[14px]">{error}</p>}
+            {error && <p className="text-bad text-[12px] font-mono">{error}</p>}
 
-            <button type="submit" disabled={busy} className="pill pill-dark w-full py-2.5 disabled:opacity-60">
-              {busy ? 'Signing in…' : 'Sign in'}
+            <button type="submit" disabled={busy} className="btn btn-primary w-full py-2.5 disabled:opacity-60">
+              {busy ? 'authenticating...' : 'login'}
             </button>
           </form>
-
-          <p className="greentext text-[13px] mt-6 leading-relaxed">
-            &gt;be sysadmin
-            <br />
-            &gt;forget password
-            <br />
-            &gt;locked out of own subnet
-          </p>
         </main>
       </div>
-
-      <footer className="flex flex-wrap justify-center gap-x-4 gap-y-1 px-4 py-4 text-[13px] text-muted">
-        <span>© 2026 m12</span>
-      </footer>
     </div>
   )
 }

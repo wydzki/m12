@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { TopBar, Sidebar, BottomNav } from './Layout.jsx'
 import { MetricCard, TrafficChart } from './Charts.jsx'
 import { NodesTable, DeploymentsTable } from './Tables.jsx'
-import ActivityFeed from './ActivityFeed.jsx'
 import SettingsPanel from './SettingsPanel.jsx'
 import BuildPanel from './BuildPanel.jsx'
 import NodeTerminal from './NodeTerminal.jsx'
@@ -39,11 +38,10 @@ export default function Dashboard({ session, onLogout, onExpired }) {
       setData(r.data)
       setError('')
     } catch {
-      setError('Lost connection to the server. Retrying…')
+      setError('connection lost. retrying...')
     }
   }, [onExpired])
 
-  // poll every 30s; also keeps "x mins ago" fresh
   useEffect(() => {
     load()
     const id = setInterval(load, 30_000)
@@ -63,14 +61,13 @@ export default function Dashboard({ session, onLogout, onExpired }) {
     return nodes.filter((n) => [n.id, n.ip, n.region, n.status].some((v) => v.toLowerCase().includes(q)))
   }, [nodes, query])
 
-  // typing in search jumps to the node list unless you're already looking at one
   function search(q) {
     setQuery(q)
     if (q && page !== 'overview' && page !== 'nodes') setPage('nodes')
   }
 
   return (
-    <div className="min-h-screen bg-soft pb-16 md:pb-0">
+    <div className="min-h-screen bg-page pb-14 md:pb-0">
       <TopBar
         session={session}
         workspace={workspace}
@@ -80,37 +77,34 @@ export default function Dashboard({ session, onLogout, onExpired }) {
         onLogout={onLogout}
       />
 
-      <div className="flex gap-6 px-4 py-5 max-w-[1400px] mx-auto">
+      <div className="flex gap-4 px-4 py-4 max-w-[1400px] mx-auto">
         <Sidebar page={page} onPage={setPage} nodes={nodes ?? []} subnet={data?.subnet} live={data?.live} demo={data?.demo} execEnabled={execEnabled} />
 
-        <main className="flex-1 min-w-0 space-y-4">
-          {error && <div className="card px-4 py-3 text-bad text-[14px]">{error}</div>}
-          {!data && !error && <div className="card px-4 py-10 text-center text-muted">Loading…</div>}
+        <main className="flex-1 min-w-0 space-y-3">
+          {error && <div className="card px-3 py-2.5 text-bad text-[13px] font-mono">{error}</div>}
+          {!data && !error && <div className="card px-3 py-8 text-center text-muted font-mono text-[13px]">loading...</div>}
           {data && data.total === 0 && (
-            <div className="card px-4 py-3 text-[14px]">
-              <span className="font-semibold">No nodes connected yet.</span>{' '}
-              <span className="text-muted">Deploy an agent with a valid client certificate and it'll appear here as it checks in over mTLS.</span>
+            <div className="card px-3 py-2.5 text-[13px] font-mono">
+              <span className="text-warn">no nodes connected.</span>{' '}
+              <span className="text-muted">deploy an agent with a valid mTLS cert to begin.</span>
             </div>
           )}
           {data && data.demo && (
-            <div className="card px-4 py-3 text-[14px]">
-              <span className="font-semibold">Showing sample data.</span>{' '}
-              <span className="text-muted">No real nodes have reported yet — this is a demo fleet. Set <code className="font-mono">M12_DEMO=0</code> to hide it.</span>
+            <div className="card px-3 py-2.5 text-[13px] font-mono">
+              <span className="text-warn">demo mode.</span>{' '}
+              <span className="text-muted">showing sample fleet. set M12_DEMO=0 to disable.</span>
             </div>
           )}
 
           {data && page === 'overview' && (
-            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4">
-              <div className="space-y-4 min-w-0">
-                <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4">
-                  {data.metrics.map((m) => (
-                    <MetricCard key={m.key} metric={m} />
-                  ))}
-                </div>
-                <TrafficChart traffic={data.traffic} />
-                <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
+            <div className="space-y-3 min-w-0">
+              <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-3">
+                {data.metrics.map((m) => (
+                  <MetricCard key={m.key} metric={m} />
+                ))}
               </div>
-              <ActivityFeed events={data.events} />
+              <TrafficChart traffic={data.traffic} />
+              <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
             </div>
           )}
 
@@ -119,12 +113,9 @@ export default function Dashboard({ session, onLogout, onExpired }) {
           )}
 
           {data && page === 'deployments' && (
-            <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4">
-              <div className="space-y-4 min-w-0">
-                {buildEnabled && <BuildPanel />}
-                <DeploymentsTable deployments={data.deployments} />
-              </div>
-              <ActivityFeed events={data.events} limit={6} />
+            <div className="space-y-3 min-w-0">
+              {buildEnabled && <BuildPanel />}
+              <DeploymentsTable deployments={data.deployments} />
             </div>
           )}
 

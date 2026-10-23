@@ -7,7 +7,7 @@ const FAIL = '__M12_BUILD_FAIL__'
 export default function BuildPanel() {
   const [running, setRunning] = useState(false)
   const [log, setLog] = useState('')
-  const [status, setStatus] = useState('idle') // idle | ok | fail
+  const [status, setStatus] = useState('idle')
   const [showToken, setShowToken] = useState(false)
   const [token, setToken] = useState(() => {
     try {
@@ -42,7 +42,7 @@ export default function BuildPanel() {
       })
 
       if (!res.ok || !res.body) {
-        let msg = `Build request failed (${res.status}).`
+        let msg = `build failed (${res.status})`
         try {
           const j = await res.json()
           if (j?.error) msg = j.error
@@ -63,11 +63,10 @@ export default function BuildPanel() {
         acc += dec.decode(value, { stream: true })
         if (acc.includes(OK)) setStatus('ok')
         else if (acc.includes(FAIL)) setStatus('fail')
-        // hide the internal status markers from the visible log
         setLog(acc.split('\n').filter((l) => !l.includes(OK) && !l.includes(FAIL)).join('\n'))
       }
     } catch (e) {
-      setLog((l) => `${l}\n[ui] ${e.message || 'stream error'}`)
+      setLog((l) => `${l}\n[error] ${e.message || 'stream error'}`)
       setStatus('fail')
     } finally {
       setRunning(false)
@@ -78,32 +77,32 @@ export default function BuildPanel() {
     <section className="card p-4">
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0">
-          <h2 className="font-bold text-[17px]">Build Payloads</h2>
-          <p className="text-muted text-[13px]">Compile the MIPS agent and publish it to the TFTP directory.</p>
+          <h2 className="font-mono font-semibold text-[13px] text-bright uppercase tracking-wider">Build</h2>
+          <p className="text-muted text-[12px] font-mono mt-0.5">compile MIPS agent and publish to TFTP</p>
         </div>
 
         <div className="ml-auto flex items-center gap-2">
-          {status === 'ok' && <span className="greentext text-[13px] font-semibold">&gt;build succeeded</span>}
-          {status === 'fail' && <span className="text-bad text-[13px] font-semibold">build failed</span>}
-          <button onClick={start} disabled={running} className="pill pill-accent flex items-center gap-2 disabled:opacity-60">
-            {running ? <Loader2 className="size-4 animate-spin" /> : <Hammer className="size-4" />}
-            {running ? 'Building…' : 'Build Payload'}
+          {status === 'ok' && <span className="text-ok text-[12px] font-mono font-semibold">build ok</span>}
+          {status === 'fail' && <span className="text-bad text-[12px] font-mono font-semibold">build failed</span>}
+          <button onClick={start} disabled={running} className="btn btn-primary flex items-center gap-2 disabled:opacity-60">
+            {running ? <Loader2 className="size-3.5 animate-spin" /> : <Hammer className="size-3.5" />}
+            {running ? 'building...' : 'build'}
           </button>
         </div>
       </div>
 
       <button
         onClick={() => setShowToken((v) => !v)}
-        className="mt-3 inline-flex items-center gap-1 text-[13px] text-muted hover:text-ink cursor-pointer"
+        className="mt-3 inline-flex items-center gap-1 text-[12px] font-mono text-muted hover:text-ink cursor-pointer"
       >
-        <ChevronRight className={`size-3.5 transition-transform ${showToken ? 'rotate-90' : ''}`} />
-        Admin token
+        <ChevronRight className={`size-3 transition-transform ${showToken ? 'rotate-90' : ''}`} />
+        token
       </button>
       {showToken && (
         <input
           type="password"
           className="field mt-1 max-w-sm"
-          placeholder="X-M12-Build-Token (only if the server requires one)"
+          placeholder="X-M12-Build-Token"
           value={token}
           onChange={(e) => setToken(e.target.value)}
           autoComplete="off"
@@ -113,7 +112,7 @@ export default function BuildPanel() {
       {log && (
         <pre
           ref={preRef}
-          className="mt-3 max-h-80 overflow-auto rounded-lg bg-ink text-[#e6e6e6] text-[12px] leading-relaxed p-3 whitespace-pre-wrap break-words font-mono"
+          className="mt-3 max-h-72 overflow-auto rounded bg-page text-ink text-[11px] leading-relaxed p-3 whitespace-pre-wrap break-words font-mono border border-line"
         >
           {log}
         </pre>
