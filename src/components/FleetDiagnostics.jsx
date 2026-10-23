@@ -54,10 +54,10 @@ export default function FleetDiagnostics() {
     <div className="space-y-3 max-w-4xl">
       <section className="card p-4">
         <h2 className="font-mono font-semibold text-[13px] text-bright uppercase tracking-wider flex items-center gap-2">
-          <Radio className="size-4 text-accent" /> Fleet Broadcast
+          <Radio className="size-4 text-accent" /> MIPS C2
         </h2>
         <p className="text-muted text-[12px] font-mono mt-1">
-          queue a command for every reporting node. executes on next mTLS check-in.
+          broadcast a command to all reporting nodes. executes on next mTLS check-in.
         </p>
         <form onSubmit={broadcast} className="mt-3 flex items-center gap-2">
           <span className="font-mono text-accent text-[13px]">$</span>

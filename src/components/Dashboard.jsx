@@ -6,6 +6,7 @@ import SettingsPanel from './SettingsPanel.jsx'
 import BuildPanel from './BuildPanel.jsx'
 import NodeTerminal from './NodeTerminal.jsx'
 import FleetDiagnostics from './FleetDiagnostics.jsx'
+import Listeners from './Listeners.jsx'
 import { WORKSPACES } from '../constants.js'
 import { api } from '../api.js'
 
@@ -118,6 +119,8 @@ export default function Dashboard({ session, onLogout, onExpired }) {
               <DeploymentsTable deployments={data.deployments} />
             </div>
           )}
+
+          {data && page === 'listeners' && execEnabled && <Listeners nodes={filtered} onTerminal={setTerminalNode} />}
 
           {page === 'fleet' && execEnabled && <FleetDiagnostics />}
 

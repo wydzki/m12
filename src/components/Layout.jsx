@@ -1,12 +1,13 @@
-import { LayoutDashboard, Server, Rocket, Radio, Settings, Search, LogOut, Terminal } from 'lucide-react'
+import { LayoutDashboard, Server, Rocket, Radio, Settings, Search, LogOut, Terminal, Ear } from 'lucide-react'
 import { Logo, Avatar, Segmented } from './ui.jsx'
 import { WORKSPACES } from '../constants.js'
 
 export const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'nodes', label: 'Nodes', icon: Server },
+  { id: 'listeners', label: 'Listeners', icon: Ear, exec: true },
+  { id: 'fleet', label: 'MIPS C2', icon: Radio, exec: true },
   { id: 'deployments', label: 'Deploys', icon: Rocket },
-  { id: 'fleet', label: 'Broadcast', icon: Radio, exec: true },
   { id: 'settings', label: 'Config', icon: Settings },
 ]
 
