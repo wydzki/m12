@@ -13,8 +13,11 @@ Two listeners, deliberately separate:
 The ingest port can face the internet safely: Node is configured with
 `requestCert + rejectUnauthorized`, so any client without a certificate signed
 by your private CA is dropped during the TLS handshake — no application code
-runs for them. A node's identity is the certificate CN, read from the verified
-cert, so one node cannot report as another.
+runs for them. By default a node's identity is the certificate CN, read from the
+verified cert, so one node cannot report as another. (In *fleet mode* — one
+shared membership cert flashed to many devices — each device instead self-reports
+a node id derived from its MAC; the cert then proves fleet membership rather than
+which device. See [client/README.md](client/README.md) for that trust model.)
 
 ## Local development
 
@@ -157,9 +160,13 @@ This appends to `pki/revoked.txt`, which the server re-reads on the next request
 ### Ingest hardening
 
 - TLS 1.2+ only; unauthenticated handshakes rejected before any app code.
-- Identity = cert CN (validated against `^[a-z][a-z0-9-]{1,63}$`), never the payload.
-- Revocation list, hot-reloaded, by CN or serial.
+- Identity = cert CN (validated against `^[a-z][a-z0-9-]{1,63}$`). In fleet mode a
+  device-reported node id (same charset rule) is used instead, authorized by the
+  shared membership cert — a convenience, not a per-device boundary.
+- Revocation list, hot-reloaded, by CN or serial (and by reported node id in fleet mode).
 - Per-node rate limit (120 req/min), 4 KB body cap, strict telemetry validation.
+  Note: in fleet mode the rate limit is keyed by the shared cert CN, so it is
+  fleet-wide — fine at homelab scale, worth raising (`perNodePerMin`) for large fleets.
 - EC P-256 keys — cheap for MIPS devices to handshake.
 
 ## Build endpoint (compile the agent from the dashboard)

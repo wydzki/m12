@@ -80,8 +80,14 @@ EOF
     openssl req -new -key "$key" -subj "/CN=$node" -out "$csr"
     openssl x509 -req -in "$csr" -CA "$ca_crt" -CAkey "$ca_key" -CAcreateserial \
       -sha256 -days "$LEAF_DAYS" -extfile "$ext" -out "$crt"
+    # Combined identity file (cert + key) for the single-file fleet flow: flash
+    # the same CA-embedded binary everywhere, then drop this one node.pem per
+    # device. Written 0600 by the umask above — it contains the private key.
+    pem="$PKI_DIR/$node.pem"
+    cat "$crt" "$key" > "$pem"
     echo "node cert for '$node':"
-    echo "  copy to the node:  $crt  $key  $ca_crt"
+    echo "  two-file:   copy  $crt  $key  (+ $ca_crt)  to the node"
+    echo "  single-file: copy  $pem  as node.pem  (CA baked into the agent binary)"
     echo "  serial: $(openssl x509 -in "$crt" -noout -serial | cut -d= -f2)"
     ;;
 

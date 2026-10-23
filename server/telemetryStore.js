@@ -11,8 +11,8 @@ export class TelemetryStore {
     this.map = new Map() // nodeId -> { region, reportedStatus, metrics, lastSeen, ip }
   }
 
-  // Called by the ingest listener. nodeId comes from the client certificate CN,
-  // never from the request body, so a node cannot report as another node.
+  // Called by the ingest listener. nodeId is the cert CN (per-node-cert setup)
+  // or the device-reported id (fleet mode); see ingest.js for the trust model.
   record(nodeId, data, ip) {
     if (!this.map.has(nodeId) && this.map.size >= this.maxNodes) {
       // evict the stalest node to bound memory under a flood of distinct CNs

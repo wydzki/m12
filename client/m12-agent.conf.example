@@ -4,7 +4,7 @@
 #   M12_CONFIG=/etc/m12/agent.conf /usr/sbin/m12-agent
 #
 # Precedence (later wins): compile-time defaults < this file < environment
-# ($M12_HOST, $M12_PORT, $M12_REGION, $M12_CA, $M12_CERT, $M12_KEY).
+# ($M12_HOST, $M12_PORT, $M12_REGION, $M12_CA, $M12_CERT, $M12_KEY, $M12_IDENTITY).
 # Lines are "key = value"; '#' starts a comment; unknown keys are ignored.
 
 # Ingest endpoint for this lab deployment.
@@ -14,7 +14,20 @@ port   = 8802
 # Free-form label reported with telemetry.
 region = homelab
 
+# Node id. Leave unset and the agent derives a stable id from this device's MAC
+# (node-aabbccddeeff) — so one identical fleet binary still reports as a distinct
+# node. Set it to pin a specific id, or set M12_IFACE to choose which interface's
+# MAC to use (default: eth0/br-lan/... then first non-loopback).
+#node = node-rack1-0007
+
 # mTLS material (absolute paths recommended on the device).
 ca   = /etc/m12/ca.crt
-cert = /etc/m12/node.crt
-key  = /etc/m12/node.key
+
+# Identity: EITHER one combined file (cert + key in one PEM) ...
+identity = /etc/m12/node.pem
+# ... OR the classic two files (used only when 'identity' is unset/empty):
+#cert = /etc/m12/node.crt
+#key  = /etc/m12/node.key
+
+# Fleet builds (make EMBED_CA=1) bake the CA in and default 'identity' to
+# node.pem, so on the device you often need none of the above — just node.pem.

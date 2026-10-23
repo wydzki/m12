@@ -4,8 +4,16 @@
 // private CA. `requestCert + rejectUnauthorized` make Node reject the TLS
 // handshake for anyone whose cert isn't CA-signed, so unauthorized traffic
 // never reaches application code — which is what makes binding to a public
-// interface safe. The node's identity is the certificate CN, taken from the
-// verified cert, never from the request body.
+// interface safe.
+//
+// Node identity: by default it is the certificate CN (one cert per node — a
+// node then cannot report as another). In FLEET mode the whole fleet shares one
+// membership cert and each device self-identifies with a `node` id in the body
+// (the agent derives it from its MAC). The CA-signed cert is still the auth
+// boundary — it proves the sender belongs to the fleet — but a reported id is
+// NOT a boundary between fleet members: any holder of the shared cert can claim
+// any node id. Revocation by reported id (below) is therefore advisory; revoking
+// the shared cert CN is what actually removes the whole fleet's access.
 import https from 'node:https'
 import fs from 'node:fs'
 import { RateLimiter } from './security.js'
@@ -18,6 +26,13 @@ const STATUS = new Set(['healthy', 'scanning', 'offline'])
 function validateTelemetry(b) {
   if (typeof b !== 'object' || b === null || Array.isArray(b)) return null
   const out = {}
+  // Reported node id (fleet mode): the shared client cert proves fleet
+  // membership, and each device self-identifies here. Must look like a node id;
+  // empty/absent means "fall back to the cert CN" (classic per-node-cert setup).
+  if (b.node !== undefined && b.node !== '') {
+    if (typeof b.node !== 'string' || !CN_RE.test(b.node)) return null
+    out.node = b.node
+  }
   if (b.status !== undefined) {
     if (typeof b.status !== 'string' || !STATUS.has(b.status)) return null
     out.status = b.status
@@ -114,7 +129,12 @@ function validateOutput(b) {
   if (typeof b.output !== 'string') return null
   const exitCode = b.exitCode === undefined || b.exitCode === null ? null : b.exitCode
   if (exitCode !== null && !Number.isInteger(exitCode)) return null
-  return { id: b.id, output: b.output, exitCode }
+  let node
+  if (b.node !== undefined && b.node !== '') {
+    if (typeof b.node !== 'string' || !CN_RE.test(b.node)) return null
+    node = b.node
+  }
+  return { id: b.id, output: b.output, exitCode, node }
 }
 
 export function createIngestServer({ ca, cert, key, store, execStore = null, revokedFile, log = console.log, bodyLimit = 4096, perNodePerMin = 120 }) {
@@ -176,18 +196,29 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, rev
         if (path === '/output') {
           const out = validateOutput(body)
           if (!out) return send(422, { error: 'invalid output' })
-          // A node can only answer command ids queued for its own cert CN.
-          const ok = execStore.recordOutput(cn, out.id, out.output, out.exitCode)
+          const nodeId = out.node || cn
+          if (out.node && revoked.isRevoked(nodeId)) return send(403, { error: 'node revoked' })
+          // A node can only answer command ids queued for its own node id.
+          const ok = execStore.recordOutput(nodeId, out.id, out.output, out.exitCode)
           return send(ok ? 200 : 404, ok ? { ok: true } : { error: 'unknown command id for this node' })
         }
 
         const telemetry = validateTelemetry(body)
         if (!telemetry) return send(422, { error: 'invalid telemetry' })
 
-        store.record(cn, telemetry, req.socket.remoteAddress)
+        // Node identity: the device-reported id when present (fleet mode — the
+        // cert is shared and only proves membership), else the cert CN. A
+        // reported id can also be revoked individually via the revocation file.
+        const nodeId = telemetry.node || cn
+        if (telemetry.node && revoked.isRevoked(nodeId)) {
+          log(`ingest revoked node=${nodeId} cn=${cn}`)
+          return send(403, { error: 'node revoked' })
+        }
+
+        store.record(nodeId, telemetry, req.socket.remoteAddress)
         // Deliver any commands queued for this node (it will run them and POST /output).
-        const commands = execStore ? execStore.takePending(cn) : []
-        send(200, { ok: true, node: cn, commands })
+        const commands = execStore ? execStore.takePending(nodeId) : []
+        send(200, { ok: true, node: nodeId, commands })
       } catch (err) {
         log('ingest error', err?.message || err)
         if (!res.headersSent) send(500, { error: 'internal error' })

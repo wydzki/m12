@@ -43,6 +43,15 @@ override CROSS  := $(MIPS_CROSS)
 CC               = $(CROSS)gcc
 AR               = $(CROSS)ar
 
+# Pin the ISA to MIPS32 (o32 ABI). Home-router cores (AR9xxx/ath79 24Kc,
+# MT7620/MT7621 24KEc, BCM63xx) are MIPS32, almost all r2 — but plain `mips32`
+# is the broadest baseline and still runs on r2 parts. This guards against a
+# toolchain whose default is MIPS64/n32/n64. Override for an r2-only fleet with
+# `make MIPS_ARCH=mips32r2`.
+MIPS_ARCH       ?= mips32
+MIPS_ABI        ?= 32
+ARCHFLAGS        = -march=$(MIPS_ARCH) -mabi=$(MIPS_ABI)
+
 MBEDTLS_VERSION ?= 3.6.7
 MBEDTLS         ?= mbedtls-$(MBEDTLS_VERSION)
 MBEDTLS_LIB      = $(MBEDTLS)/library/libmbedtls.a
@@ -52,10 +61,68 @@ MBEDTLS_URL      = https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls
 
 # Trim per-connection TLS buffers: payloads are tiny and the server sends a small
 # EC certificate, so 4 KB each way is plenty (default is 16 KB).
-MBEDTLS_CFLAGS   = -Os -DMBEDTLS_SSL_IN_CONTENT_LEN=4096 -DMBEDTLS_SSL_OUT_CONTENT_LEN=4096
+MBEDTLS_CFLAGS   = -Os $(ARCHFLAGS) -ffunction-sections -fdata-sections \
+                   -DMBEDTLS_SSL_IN_CONTENT_LEN=4096 -DMBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# MINIMAL_TLS=1 compiles mbedTLS (and the agent) against mbedtls_config.min.h,
+# which enables ONLY TLS 1.2 + ECDHE-ECDSA-AES128-GCM-SHA256 + P-256. This is the
+# big size win (stock mbedTLS ~800 KB -> ~200 KB or less). The same -D MUST reach
+# both the library and the agent so their struct layouts agree, hence the shared
+# CPPFLAGS below. Needs an absolute path (mbedTLS builds from its own subdir).
+ifdef MINIMAL_TLS
+TLS_CONFIG      := $(abspath mbedtls_config.min.h)
+TLS_CONFIG_DEF  := -DMBEDTLS_CONFIG_FILE='"$(TLS_CONFIG)"'
+MBEDTLS_CFLAGS  += $(TLS_CONFIG_DEF)
+endif
+
+# Fleet flow (one image for many routers): EMBED_CA=1 bakes in ONLY the
+# shared CA (public, not secret), so the flashed binary is byte-for-byte identical
+# on every node. Each device carries its own identity in a single node.pem (cert
+# + key) — the build defaults the identity path to node.pem. Per-node identity and
+# per-node revocation are preserved; you just flash + drop one small file.
+#
+#   make EMBED_CA=1 MINIMAL_TLS=1 MIPS_CROSS=mipsel-linux-musl- CA=../pki/ca.crt \
+#        CFLAGS='-Os -DSERVER_HOST="ingest.example.com" -DSERVER_PORT="8802"'
+#
+# EMBED_CERTS=1 instead bakes in all three (CA+cert+key) -> a fully standalone
+# binary with nothing else to copy to the device. Two ways to use it:
+#   * per-node  : a different cert per router -> one build per router, each keeps
+#                 its own identity + revocation (binary differs between routers).
+#   * shared/fleet: ONE cert used for the whole fleet -> a single identical binary
+#                 flashed to every router, nothing else on the device. Simplest to
+#                 deploy, but all routers share one identity: they appear as a
+#                 single node on the dashboard and revoke affects them all. The
+#                 binary embeds that shared private key, so treat it as a secret.
+#
+#   # shared/fleet image (mint one cert for the whole fleet, then build once):
+#   #   ./scripts/pki.sh node-cert homelab-fleet
+#   make EMBED_CERTS=1 MINIMAL_TLS=1 CA=../pki/ca.crt \
+#        CERT=../pki/homelab-fleet.crt KEY=../pki/homelab-fleet.key \
+#        CFLAGS='-Os -DSERVER_HOST="ingest.example.com" -DSERVER_PORT="8802"'
+EMBED_HDR       := embedded_certs.h
+CA              ?=
+CERT            ?=
+KEY             ?=
+ifdef EMBED_CERTS
+override AGENT_CPPFLAGS += -DEMBED_CERTS
+EMBED_DEP       := $(EMBED_HDR)
+EMBED_GEN_ARGS   = "$(CA)" "$(CERT)" "$(KEY)"
+else ifdef EMBED_CA
+override AGENT_CPPFLAGS += -DEMBED_CA -DIDENTITY_PATH='"node.pem"'
+EMBED_DEP       := $(EMBED_HDR)
+EMBED_GEN_ARGS   = "$(CA)"
+endif
+
+# Size-oriented codegen, applied to the agent object (ARCHFLAGS pins MIPS32).
+# -flto lets dead code be dropped across the agent + mbedTLS; drop it if your
+# toolchain throws LTO link errors. Unwind/stack-protector tables are dead weight
+# on a tiny single-shot agent.
+SIZEFLAGS        = $(ARCHFLAGS) -flto -fno-stack-protector \
+                   -fno-asynchronous-unwind-tables -fno-unwind-tables -fomit-frame-pointer
 
 CFLAGS          ?= -Os -ffunction-sections -fdata-sections
-LDFLAGS          = -static -Wl,--gc-sections -s
+AGENT_CFLAGS     = $(CFLAGS) $(SIZEFLAGS) $(TLS_CONFIG_DEF) $(AGENT_CPPFLAGS)
+LDFLAGS          = -static -flto -Wl,--gc-sections -Wl,--as-needed -s
 LIBS             = -lmbedtls -lmbedx509 -lmbedcrypto
 
 BIN              = m12-agent
@@ -80,21 +147,38 @@ fresh:
 # Faster, but trusts the existing lib — use `make`/`make fresh` when in doubt.
 quick: $(BIN)
 
-$(BIN): client.c $(MBEDTLS_LIB)
-	$(CC) $(CFLAGS) $< -o $@ \
+# Regenerate the embedded-certs header whenever the source PEMs change (only a
+# prerequisite when EMBED_CA / EMBED_CERTS is set, so a normal build needs none).
+$(EMBED_HDR): $(CA) $(CERT) $(KEY)
+	@test -n "$(CA)" || { echo "embedding needs CA= (path to pki/ca.crt)"; exit 1; }
+	@test -z "$(EMBED_CERTS)" || { test -n "$(CERT)" && test -n "$(KEY)"; } || \
+	    { echo "EMBED_CERTS=1 also requires CERT= and KEY= (this node's cert + key)"; exit 1; }
+	../scripts/embed-certs.sh $(EMBED_GEN_ARGS) > $@
+	@echo "generated $@"
+
+$(BIN): client.c $(EMBED_DEP) $(MBEDTLS_LIB)
+	$(CC) $(AGENT_CFLAGS) $< -o $@ \
 	    -I"$(MBEDTLS)/include" -L"$(MBEDTLS)/library" \
 	    $(LDFLAGS) $(LIBS)
-	@echo "built $@  (CROSS=$(CROSS))"
+	@echo "built $@  (CROSS=$(CROSS), arch=$(MIPS_ARCH)/$(MIPS_ABI), minimal_tls=$(if $(MINIMAL_TLS),yes,no))"
 	@$(CROSS)size $@ 2>/dev/null || true
 
-# Fail the build loudly unless the binary is a big-endian (MSB) MIPS ELF, so a
-# wrong-arch artifact can never reach the staging step unnoticed.
+# Fail the build loudly unless the binary is a 32-bit MIPS ELF with the endianness
+# that matches the toolchain, so a wrong-arch artifact can never reach staging.
+# Endianness is derived from CROSS (mipsel/mipsle -> little-endian/LSB), so a
+# legitimate `make MIPS_CROSS=mipsel-linux-musl-` build verifies instead of being
+# rejected for not being big-endian.
 verify:
 	@if command -v file >/dev/null 2>&1; then \
 	    desc=`file -b $(BIN)`; \
-	    echo "$$desc" | grep -q 'MIPS' || { echo "VERIFY FAILED (not MIPS): $$desc"; exit 1; }; \
-	    echo "$$desc" | grep -q 'MSB'  || { echo "VERIFY FAILED (not big-endian/MSB): $$desc"; exit 1; }; \
-	    echo "verified big-endian MIPS: $$desc"; \
+	    case "$(CROSS)" in \
+	        *mipsel*|*mipsle*) want=LSB; wname="little-endian (LSB)";; \
+	        *)                 want=MSB; wname="big-endian (MSB)";; \
+	    esac; \
+	    echo "$$desc" | grep -q 'MIPS'    || { echo "VERIFY FAILED (not MIPS): $$desc"; exit 1; }; \
+	    echo "$$desc" | grep -q '32-bit'  || { echo "VERIFY FAILED (not 32-bit MIPS): $$desc"; exit 1; }; \
+	    echo "$$desc" | grep -q "$$want"  || { echo "VERIFY FAILED (expected $$wname for CROSS=$(CROSS)): $$desc"; exit 1; }; \
+	    echo "verified 32-bit $$wname MIPS: $$desc"; \
 	else \
 	    echo "note: 'file' not found on PATH; skipping arch verification"; \
 	fi
@@ -109,7 +193,7 @@ $(MBEDTLS_LIB):
 	$(MAKE) -C "$(MBEDTLS)" CC=$(CC) AR=$(AR) CFLAGS="$(MBEDTLS_CFLAGS)" lib
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) $(EMBED_HDR)   # drop the generated header too (it holds a key)
 
 distclean: clean
 	rm -rf "$(MBEDTLS)" "$(MBEDTLS_TARBALL)"
