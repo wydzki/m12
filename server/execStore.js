@@ -16,16 +16,18 @@ export class ExecStore {
     // allowlist: null = any command allowed; otherwise a Set of exact commands.
     this.allowlist = allowlist && allowlist.size ? allowlist : null
     this.log = log
-    this.map = new Map() // nodeId -> [ {id, command, status, queuedAt, sentAt, finishedAt, output, exitCode, by} ]
+    this.map = new Map() // nodeId -> [ {id, command, status, queuedAt, sentAt, finishedAt, output, exitCode, by, taskId} ]
+    this.tasks = new Map() // taskId -> { command, by, at, targets: [{nodeId, id}] }
+    this.maxTasks = 200
   }
 
   isAllowed(command) {
     return !this.allowlist || this.allowlist.has(command.trim())
   }
 
-  queue(nodeId, command, by = 'admin') {
+  queue(nodeId, command, by = 'admin', taskId = null) {
     const id = crypto.randomBytes(9).toString('base64url')
-    const entry = { id, command, status: 'pending', queuedAt: Date.now(), sentAt: null, finishedAt: null, output: null, exitCode: null, by }
+    const entry = { id, command, status: 'pending', queuedAt: Date.now(), sentAt: null, finishedAt: null, output: null, exitCode: null, by, taskId }
     let list = this.map.get(nodeId)
     if (!list) {
       if (this.map.size >= this.maxNodes) this.map.delete(this.map.keys().next().value)
@@ -74,5 +76,29 @@ export class ExecStore {
 
   list(nodeId) {
     return (this.map.get(nodeId) || []).slice().reverse() // newest first
+  }
+
+  // Queue one command for many nodes and record the group as a task.
+  broadcast(nodeIds, command, by = 'admin') {
+    const taskId = crypto.randomBytes(9).toString('base64url')
+    const targets = []
+    for (const nodeId of nodeIds) {
+      const entry = this.queue(nodeId, command, by, taskId)
+      targets.push({ nodeId, id: entry.id })
+    }
+    if (this.tasks.size >= this.maxTasks) this.tasks.delete(this.tasks.keys().next().value)
+    this.tasks.set(taskId, { command, by, at: Date.now(), targets })
+    this.log(`exec broadcast task=${taskId} nodes=${targets.length} by=${by} cmd=${JSON.stringify(command).slice(0, 200)}`)
+    return { taskId, count: targets.length }
+  }
+
+  getTask(taskId) {
+    const task = this.tasks.get(taskId)
+    if (!task) return null
+    const nodes = task.targets.map(({ nodeId, id }) => {
+      const e = (this.map.get(nodeId) || []).find((x) => x.id === id)
+      return { nodeId, status: e ? e.status : 'gone', exitCode: e ? e.exitCode : null, output: e ? e.output : null }
+    })
+    return { taskId, command: task.command, by: task.by, at: task.at, nodes }
   }
 }

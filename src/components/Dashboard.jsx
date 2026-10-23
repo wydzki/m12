@@ -6,6 +6,7 @@ import ActivityFeed from './ActivityFeed.jsx'
 import SettingsPanel from './SettingsPanel.jsx'
 import BuildPanel from './BuildPanel.jsx'
 import NodeTerminal from './NodeTerminal.jsx'
+import FleetDiagnostics from './FleetDiagnostics.jsx'
 import { WORKSPACES } from '../constants.js'
 import { api } from '../api.js'
 
@@ -80,7 +81,7 @@ export default function Dashboard({ session, onLogout, onExpired }) {
       />
 
       <div className="flex gap-6 px-4 py-5 max-w-[1400px] mx-auto">
-        <Sidebar page={page} onPage={setPage} nodes={nodes ?? []} subnet={data?.subnet} live={data?.live} demo={data?.demo} />
+        <Sidebar page={page} onPage={setPage} nodes={nodes ?? []} subnet={data?.subnet} live={data?.live} demo={data?.demo} execEnabled={execEnabled} />
 
         <main className="flex-1 min-w-0 space-y-4">
           {error && <div className="card px-4 py-3 text-bad text-[14px]">{error}</div>}
@@ -127,11 +128,13 @@ export default function Dashboard({ session, onLogout, onExpired }) {
             </div>
           )}
 
+          {page === 'fleet' && execEnabled && <FleetDiagnostics />}
+
           {data && page === 'settings' && <SettingsPanel subnet={data.subnet} />}
         </main>
       </div>
 
-      <BottomNav page={page} onPage={setPage} />
+      <BottomNav page={page} onPage={setPage} execEnabled={execEnabled} />
       {terminalNode && <NodeTerminal nodeId={terminalNode} onClose={() => setTerminalNode(null)} />}
     </div>
   )

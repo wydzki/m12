@@ -23,4 +23,6 @@ export const api = {
   features: () => request('/api/features'),
   nodeExec: (id) => request(`/api/nodes/${encodeURIComponent(id)}/exec`),
   runCommand: (id, command) => request(`/api/nodes/${encodeURIComponent(id)}/exec`, { method: 'POST', body: { command } }),
+  fleetExec: (command) => request('/api/fleet/exec', { method: 'POST', body: { command } }),
+  fleetTask: (taskId) => request(`/api/fleet/exec/${encodeURIComponent(taskId)}`),
 }

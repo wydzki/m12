@@ -234,6 +234,13 @@ How it's constrained:
   (`exec queue …` / `exec output …`).
 - **Off switch is the default** — leave `M12_EXEC_ENABLED` unset to remove the endpoints entirely.
 
+**Fleet broadcast:** when exec is on, a **Broadcast** page (sidebar) runs one command
+across every reporting node at once (`POST /api/fleet/exec` → a task id; the table
+polls `GET /api/fleet/exec/:id` for each node's result). Same guardrails — admin-only,
+allowlist-checked, per-node mTLS identity. Useful for `uptime`/`df -h` style health
+sweeps; equally, it's one click to run something destructive everywhere, so the
+allowlist matters even more here.
+
 If all you need is occasional diagnostics, consider leaving this off and using the
 allowlist for a fixed set of read-only checks, rather than a full remote shell.
 

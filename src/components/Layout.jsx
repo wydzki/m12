@@ -1,4 +1,4 @@
-import { LayoutDashboard, Server, Rocket, Settings, Search, LogOut, Plus } from 'lucide-react'
+import { LayoutDashboard, Server, Rocket, Radio, Settings, Search, LogOut, Plus } from 'lucide-react'
 import { Logo, Avatar, Segmented } from './ui.jsx'
 import { WORKSPACES } from '../constants.js'
 
@@ -6,8 +6,12 @@ export const PAGES = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'nodes', label: 'Nodes', icon: Server },
   { id: 'deployments', label: 'Deployments', icon: Rocket },
+  { id: 'fleet', label: 'Broadcast', icon: Radio, exec: true },
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
+
+// Pages shown given the enabled features (Broadcast only when exec is on).
+const visiblePages = (execEnabled) => PAGES.filter((p) => !p.exec || execEnabled)
 
 export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogout }) {
   return (
@@ -42,14 +46,14 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
   )
 }
 
-export function Sidebar({ page, onPage, nodes, subnet, live, demo }) {
+export function Sidebar({ page, onPage, nodes, subnet, live, demo, execEnabled }) {
   const count = (s) => nodes.filter((n) => n.status === s).length
 
   return (
     <aside className="hidden md:block w-56 shrink-0">
       <div className="sticky top-20 space-y-4">
         <nav className="space-y-1">
-          {PAGES.map(({ id, label, icon: Icon }) => {
+          {visiblePages(execEnabled).map(({ id, label, icon: Icon }) => {
             const active = id === page
             return (
               <button
@@ -109,10 +113,10 @@ export function Sidebar({ page, onPage, nodes, subnet, live, demo }) {
 }
 
 // Twitter-style bottom tab bar on phones
-export function BottomNav({ page, onPage }) {
+export function BottomNav({ page, onPage, execEnabled }) {
   return (
     <nav className="md:hidden fixed bottom-0 inset-x-0 z-20 bg-white border-t border-line flex justify-around py-2">
-      {PAGES.map(({ id, label, icon: Icon }) => (
+      {visiblePages(execEnabled).map(({ id, label, icon: Icon }) => (
         <button
           key={id}
           onClick={() => onPage(id)}

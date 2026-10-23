@@ -267,6 +267,33 @@ async function execRoute(req, res, nodeId) {
   json(res, 202, { id: entry.id, status: entry.status })
 }
 
+// Fleet broadcast: queue one command for every node that has reported telemetry.
+async function fleetExecRoute(req, res) {
+  const s = requireSession(req, res)
+  if (!s) return
+  const body = await readJson(req, res)
+  const command = body?.command
+  if (typeof command !== 'string' || !command.trim() || command.length > 4096) {
+    return json(res, 400, { error: 'command must be a non-empty string (max 4096 chars).' })
+  }
+  if (!execStore.isAllowed(command)) {
+    return json(res, 403, { error: 'Command not in the allowlist (M12_EXEC_ALLOWLIST).' })
+  }
+  const nodeIds = telemetry.list().map((n) => n.id)
+  if (nodeIds.length === 0) return json(res, 409, { error: 'No nodes have reported yet.' })
+  const { taskId, count } = execStore.broadcast(nodeIds, command, s.user)
+  json(res, 202, { taskId, count })
+}
+
+const TASK_ID_RE = /^[A-Za-z0-9_-]{1,32}$/
+function fleetTaskRoute(req, res, taskId) {
+  if (!requireSession(req, res)) return
+  if (!TASK_ID_RE.test(taskId)) return json(res, 400, { error: 'Invalid task id.' })
+  const task = execStore.getTask(taskId)
+  if (!task) return json(res, 404, { error: 'Unknown task.' })
+  json(res, 200, task)
+}
+
 // Compiler endpoint, registered only when explicitly enabled.
 if (config.buildEnabled) {
   const buildHandler = createBuildHandler({
@@ -294,13 +321,27 @@ async function handleApi(req, res, pathname) {
     return true
   }
 
-  // Dynamic: /api/nodes/:id/exec (only when exec is enabled)
-  const execMatch = pathname.match(/^\/api\/nodes\/([^/]+)\/exec$/)
-  if (execMatch) {
+  // Dynamic exec routes (only when exec is enabled)
+  if (pathname.startsWith('/api/nodes/') || pathname.startsWith('/api/fleet/')) {
     if (!execStore) return json(res, 404, { error: 'Not found.' })
-    if (req.method !== 'GET' && req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
-    if (!postGuard()) return
-    return execRoute(req, res, decodeURIComponent(execMatch[1]))
+
+    const execMatch = pathname.match(/^\/api\/nodes\/([^/]+)\/exec$/)
+    if (execMatch) {
+      if (req.method !== 'GET' && req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
+      if (!postGuard()) return
+      return execRoute(req, res, decodeURIComponent(execMatch[1]))
+    }
+    if (pathname === '/api/fleet/exec') {
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
+      if (!postGuard()) return
+      return fleetExecRoute(req, res)
+    }
+    const taskMatch = pathname.match(/^\/api\/fleet\/exec\/([^/]+)$/)
+    if (taskMatch) {
+      if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed.' })
+      return fleetTaskRoute(req, res, decodeURIComponent(taskMatch[1]))
+    }
+    return json(res, 404, { error: 'Not found.' })
   }
 
   const route = routes[`${req.method} ${pathname}`]
