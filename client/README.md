@@ -48,8 +48,8 @@ Already have mbedTLS built? Point the Makefile at it and it skips the download:
 mbedTLS once (release tarball → no Python/submodules):
 
 ```sh
-curl -fsSLO https://github.com/Mbed-TLS/mbedtls/releases/download/v3.6.2/mbedtls-3.6.2.tar.bz2
-tar xjf mbedtls-3.6.2.tar.bz2 && cd mbedtls-3.6.2
+curl -fsSLO https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
+tar xjf mbedtls-3.6.7.tar.bz2 && cd mbedtls-3.6.7
 make CC=mipsel-linux-musl-gcc AR=mipsel-linux-musl-ar \
      CFLAGS="-Os -DMBEDTLS_SSL_IN_CONTENT_LEN=4096 -DMBEDTLS_SSL_OUT_CONTENT_LEN=4096" lib
 export MBEDTLS=$PWD && cd ..

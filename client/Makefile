@@ -13,11 +13,12 @@ CROSS           ?=
 CC               = $(CROSS)gcc
 AR               = $(CROSS)ar
 
-MBEDTLS_VERSION ?= 3.6.2
+MBEDTLS_VERSION ?= 3.6.7
 MBEDTLS         ?= mbedtls-$(MBEDTLS_VERSION)
 MBEDTLS_LIB      = $(MBEDTLS)/library/libmbedtls.a
 MBEDTLS_TARBALL  = mbedtls-$(MBEDTLS_VERSION).tar.bz2
-MBEDTLS_URL      = https://github.com/Mbed-TLS/mbedtls/releases/download/v$(MBEDTLS_VERSION)/$(MBEDTLS_TARBALL)
+# Release tags are "mbedtls-X.Y.Z" (not "vX.Y.Z"); the .tar.bz2 asset bundles generated sources.
+MBEDTLS_URL      = https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VERSION)/$(MBEDTLS_TARBALL)
 
 # Trim per-connection TLS buffers: payloads are tiny and the server sends a small
 # EC certificate, so 4 KB each way is plenty (default is 16 KB).
