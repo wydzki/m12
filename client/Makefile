@@ -27,8 +27,8 @@
 #
 # The endpoint and cert paths are NOT baked in: the agent reads them at runtime
 # from m12-agent.conf / $M12_CONFIG and $M12_HOST, $M12_PORT, $M12_REGION,
-# $M12_CA, $M12_CERT, $M12_KEY (see m12-agent.conf.example). You can still pin
-# build-time defaults with, e.g., CFLAGS='-Os -DSERVER_HOST=\"lab-ingest.lan\"'.
+# $M12_CA, $M12_CERT, $M12_KEY (see m12-agent.conf.example). Edit the #define
+# defaults in client.c to change the compile-time fallback.
 # -----------------------------------------------------------------------------
 #
 # Uses the mbedTLS release tarball (ships generated sources) so no Python or git
@@ -59,20 +59,24 @@ MBEDTLS_TARBALL  = mbedtls-$(MBEDTLS_VERSION).tar.bz2
 # Release tags are "mbedtls-X.Y.Z" (not "vX.Y.Z"); the .tar.bz2 asset bundles generated sources.
 MBEDTLS_URL      = https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VERSION)/$(MBEDTLS_TARBALL)
 
-# Trim per-connection TLS buffers: payloads are tiny and the server sends a small
-# EC certificate, so 4 KB each way is plenty (default is 16 KB).
-MBEDTLS_CFLAGS   = -Os $(ARCHFLAGS) -ffunction-sections -fdata-sections \
-                   -DMBEDTLS_SSL_IN_CONTENT_LEN=4096 -DMBEDTLS_SSL_OUT_CONTENT_LEN=4096
+# Shared compiler flags for the mbedTLS library build.
+MBEDTLS_CFLAGS   = -Os $(ARCHFLAGS) -ffunction-sections -fdata-sections
 
 # MINIMAL_TLS=1 compiles mbedTLS (and the agent) against mbedtls_config.min.h,
 # which enables ONLY TLS 1.2 + ECDHE-ECDSA-AES128-GCM-SHA256 + P-256. This is the
-# big size win (stock mbedTLS ~800 KB -> ~200 KB or less). The same -D MUST reach
-# both the library and the agent so their struct layouts agree, hence the shared
-# CPPFLAGS below. Needs an absolute path (mbedTLS builds from its own subdir).
+# big size win (stock mbedTLS ~800 KB -> ~200 KB or less).
+#
+# Instead of passing -DMBEDTLS_CONFIG_FILE via CFLAGS (which requires nested
+# quoting through make -> sh -> sub-make -> sh -> gcc that no single escaping
+# survives), the build copies mbedtls_config.min.h over the stock config in the
+# mbedTLS tree. Both the library and the agent then pick it up through the
+# default #include "mbedtls/mbedtls_config.h" path — no -D flag, no quoting.
 ifdef MINIMAL_TLS
-TLS_CONFIG      := $(abspath mbedtls_config.min.h)
-TLS_CONFIG_DEF  := -DMBEDTLS_CONFIG_FILE='"$(TLS_CONFIG)"'
-MBEDTLS_CFLAGS  += $(TLS_CONFIG_DEF)
+TLS_CONFIG      := mbedtls_config.min.h
+else
+# When using the stock config (16 KB default buffers), shrink to 4 KB for the
+# tiny payloads on these devices. The minimal config already defines these.
+MBEDTLS_CFLAGS  += -DMBEDTLS_SSL_IN_CONTENT_LEN=4096 -DMBEDTLS_SSL_OUT_CONTENT_LEN=4096
 endif
 
 # Fleet flow (one image for many routers): EMBED_CA=1 bakes in ONLY the
@@ -81,8 +85,7 @@ endif
 # + key) — the build defaults the identity path to node.pem. Per-node identity and
 # per-node revocation are preserved; you just flash + drop one small file.
 #
-#   make EMBED_CA=1 MINIMAL_TLS=1 MIPS_CROSS=mipsel-linux-musl- CA=../pki/ca.crt \
-#        CFLAGS='-Os -DSERVER_HOST="ingest.example.com" -DSERVER_PORT="8802"'
+#   make EMBED_CA=1 MINIMAL_TLS=1 MIPS_CROSS=mipsel-linux-musl- CA=../pki/ca.crt
 #
 # EMBED_CERTS=1 instead bakes in all three (CA+cert+key) -> a fully standalone
 # binary with nothing else to copy to the device. Two ways to use it:
@@ -97,8 +100,7 @@ endif
 #   # shared/fleet image (mint one cert for the whole fleet, then build once):
 #   #   ./scripts/pki.sh node-cert homelab-fleet
 #   make EMBED_CERTS=1 MINIMAL_TLS=1 CA=../pki/ca.crt \
-#        CERT=../pki/homelab-fleet.crt KEY=../pki/homelab-fleet.key \
-#        CFLAGS='-Os -DSERVER_HOST="ingest.example.com" -DSERVER_PORT="8802"'
+#        CERT=../pki/homelab-fleet.crt KEY=../pki/homelab-fleet.key
 EMBED_HDR       := embedded_certs.h
 CA              ?=
 CERT            ?=
@@ -121,7 +123,7 @@ SIZEFLAGS        = $(ARCHFLAGS) -flto -fno-stack-protector \
                    -fno-asynchronous-unwind-tables -fno-unwind-tables -fomit-frame-pointer
 
 CFLAGS          ?= -Os -ffunction-sections -fdata-sections
-AGENT_CFLAGS     = $(CFLAGS) $(SIZEFLAGS) $(TLS_CONFIG_DEF) $(AGENT_CPPFLAGS)
+AGENT_CFLAGS     = $(CFLAGS) $(SIZEFLAGS) $(AGENT_CPPFLAGS)
 LDFLAGS          = -static -flto -Wl,--gc-sections -Wl,--as-needed -s
 LIBS             = -lmbedtls -lmbedx509 -lmbedcrypto
 
@@ -190,6 +192,10 @@ mbedtls: $(MBEDTLS_LIB)
 $(MBEDTLS_LIB):
 	@test -f "$(MBEDTLS_TARBALL)" || curl -fsSLO "$(MBEDTLS_URL)"
 	@test -d "$(MBEDTLS)" || tar xjf "$(MBEDTLS_TARBALL)"
+	@test -z "$(TLS_CONFIG)" || { \
+	    cp "$(TLS_CONFIG)" "$(MBEDTLS)/include/mbedtls/mbedtls_config.h"; \
+	    echo "installed $(TLS_CONFIG) -> $(MBEDTLS)/include/mbedtls/mbedtls_config.h"; \
+	}
 	$(MAKE) -C "$(MBEDTLS)" CC=$(CC) AR=$(AR) CFLAGS="$(MBEDTLS_CFLAGS)" lib
 
 clean:

@@ -47,12 +47,11 @@
 #endif
 
 /* ---- configuration ----
- * The values below are compile-time DEFAULTS. Override any of them without
- * editing source, in increasing order of precedence:
- *   1. build-time:  -DSERVER_HOST=\"host\" -DSERVER_PORT=\"8802\" ...
- *   2. config file: key=value lines (see CONFIG_PATH / $M12_CONFIG)
- *   3. environment: $M12_HOST, $M12_PORT, $M12_REGION, $M12_CA/$M12_CERT/$M12_KEY
- * load_config() resolves them at startup; later sources win.
+ * The values below are compile-time fallback defaults.  Override at runtime
+ * (later sources win):
+ *   1. config file: key=value lines (see CONFIG_PATH / $M12_CONFIG)
+ *   2. environment: $M12_HOST, $M12_PORT, $M12_REGION, $M12_CA/$M12_CERT/$M12_KEY
+ * load_config() resolves them at startup.
  */
 #ifndef SERVER_HOST
 #define SERVER_HOST "ingest.zki.lol"
@@ -66,7 +65,7 @@
 /* Node id reported to the server. Empty by default: the agent then derives a
  * stable id from this device's MAC (e.g. "node-001122334455"), so one identical
  * fleet binary still reports as a distinct node per router. Override with a
- * fixed id via -DNODE_ID=\"...\", the `node` config key, or $M12_NODE. */
+ * fixed id via the `node` config key or $M12_NODE. */
 #ifndef NODE_ID
 #define NODE_ID ""
 #endif
