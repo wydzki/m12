@@ -16,11 +16,16 @@
  * (the Makefile passes -DMBEDTLS_CONFIG_FILE for BOTH the library and the agent,
  *  so their struct layouts match — never define it for only one).
  *
- * If `make` stops with an #error from mbedtls/check_config.h, it is telling you
- * a required dependency is missing here — enable exactly what it names and
- * rebuild. (Starting point if you'd rather not hand-trim: the tarball ships
+ * If `make` stops with an #error from mbedtls/check_config.h, it means a
+ * required dependency is missing — enable exactly what it names and rebuild.
+ * (Starting point if you'd rather not hand-trim: the tarball ships
  * configs/config-suite-b.h, which also compiles; this file is more aggressive —
  * P-256 + AES-128 only, no P-384/AES-256.)
+ *
+ * IMPORTANT: do NOT include check_config.h in this file. In mbedTLS 3.6.x
+ * build_info.h includes the config, runs the config_adjust_*.h derivation
+ * headers, and then runs check_config.h — in that order. Including it here
+ * would check before the derived macros (MBEDTLS_MD_CAN_*) exist.
  *
  * ASSUMPTIONS about your PKI (from scripts/pki.sh): EC P-256 keys, SHA-256
  * signatures, unencrypted PEM private keys. If your certs are RSA or SHA-1
@@ -90,6 +95,11 @@
 #define MBEDTLS_ECP_WINDOW_SIZE      2      /* smallest precompute window      */
 #define MBEDTLS_ECP_FIXED_POINT_OPTIM 0     /* drop the large fixed-point table */
 
-#include "mbedtls/check_config.h"
+/* NOTE: do NOT #include "mbedtls/check_config.h" here.
+ * In mbedTLS 3.6.x, build_info.h includes this config, then runs the
+ * config_adjust_*.h headers that derive computed macros (MBEDTLS_MD_CAN_SHA256,
+ * MBEDTLS_PK_HAVE_ECC_KEYS, etc.) from the raw defines above, and THEN
+ * includes check_config.h.  Including it prematurely here would run the
+ * checks before those derived macros exist, causing false-positive errors. */
 
 #endif /* MBEDTLS_CONFIG_MIN_H */
