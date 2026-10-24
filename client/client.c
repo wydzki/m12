@@ -5,9 +5,12 @@
  * Each run: open an mTLS connection to the ingest listener, POST telemetry to
  * /ingest, and read back any commands queued for THIS node (the server keys them
  * by our certificate CN). For each command: run it with popen(), capture output,
- * and POST the result to /output. Then exit — schedule it from cron/a timer.
+ * and POST the result to /output. Loops forever, checking in every 60 seconds
+ * by default.
  *
- *   usage: m12-agent [status]        status = healthy|scanning|offline (default healthy)
+ *   usage: m12-agent [interval] [status]
+ *          interval     seconds between check-ins (default 60)
+ *          status       healthy|scanning|offline (default healthy)
  *
  * SECURITY: /output and the command set are only ever exchanged over this mTLS
  * channel, and the server will only hand this agent commands addressed to its own
@@ -585,28 +588,40 @@ static void load_config(void) {
 }
 
 int main(int argc, char **argv) {
-  const char *status = (argc > 1) ? argv[1] : "healthy";
+  int interval = 60;
+  const char *status = "healthy";
+
+  for (int i = 1; i < argc; i++) {
+    int n = atoi(argv[i]);
+    if (n > 0) interval = n;
+    else status = argv[i];
+  }
 
   load_config();
 
   if (setup_tls() != 0) { cleanup_tls(); return 1; }
 
-  char nodefld[96];
-  node_field(nodefld, sizeof(nodefld));
-  static char tjson[320];
-  snprintf(tjson, sizeof(tjson),
-           "{%s\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
-           nodefld, status, g_cfg.region, cpu_percent(), mem_percent());
+  fprintf(stderr, "m12-agent: %s:%s interval=%ds node=%s\n",
+          g_cfg.host, g_cfg.port, interval, g_cfg.node[0] ? g_cfg.node : "(cert CN)");
 
-  static char resp[RESP_CAP];
-  int code = https_request(HTTP_PATH, tjson, resp, sizeof(resp));
-  if (code != 200) {
-    fprintf(stderr, "check-in failed: HTTP %d\n", code);
-    cleanup_tls();
-    return 1;
+  for (;;) {
+    char nodefld[96];
+    node_field(nodefld, sizeof(nodefld));
+    static char tjson[320];
+    snprintf(tjson, sizeof(tjson),
+             "{%s\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
+             nodefld, status, g_cfg.region, cpu_percent(), mem_percent());
+
+    static char resp[RESP_CAP];
+    int code = https_request(HTTP_PATH, tjson, resp, sizeof(resp));
+    if (code == 200) {
+      process_commands(http_body(resp));
+    } else {
+      fprintf(stderr, "check-in failed: HTTP %d\n", code);
+    }
+
+    sleep(interval);
   }
-
-  process_commands(http_body(resp));
 
   cleanup_tls();
   return 0;
