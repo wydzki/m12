@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { TopBar, Sidebar, BottomNav } from './Layout.jsx'
-import { MetricCard, TrafficChart } from './Charts.jsx'
+import { MetricCard } from './Charts.jsx'
 import { NodesTable, DeploymentsTable } from './Tables.jsx'
 import SettingsPanel from './SettingsPanel.jsx'
 import BuildPanel from './BuildPanel.jsx'
@@ -45,7 +45,7 @@ export default function Dashboard({ session, onLogout, onExpired }) {
 
   useEffect(() => {
     load()
-    const id = setInterval(load, 30_000)
+    const id = setInterval(load, 15_000)
     return () => clearInterval(id)
   }, [load])
 
@@ -64,7 +64,7 @@ export default function Dashboard({ session, onLogout, onExpired }) {
 
   function search(q) {
     setQuery(q)
-    if (q && page !== 'overview' && page !== 'nodes') setPage('nodes')
+    if (q && page !== 'overview' && page !== 'nodes') setPage('overview')
   }
 
   return (
@@ -84,34 +84,27 @@ export default function Dashboard({ session, onLogout, onExpired }) {
         <main className="flex-1 min-w-0 space-y-3">
           {error && <div className="card px-3 py-2.5 text-bad text-[13px] font-mono">{error}</div>}
           {!data && !error && <div className="card px-3 py-8 text-center text-muted font-mono text-[13px]">loading...</div>}
-          {data && data.total === 0 && (
+          {data && data.total === 0 && !data.demo && (
             <div className="card px-3 py-2.5 text-[13px] font-mono">
-              <span className="text-warn">no nodes connected.</span>{' '}
-              <span className="text-muted">deploy an agent with a valid mTLS cert to begin.</span>
-            </div>
-          )}
-          {data && data.demo && (
-            <div className="card px-3 py-2.5 text-[13px] font-mono">
-              <span className="text-warn">demo mode.</span>{' '}
-              <span className="text-muted">showing sample fleet. set M12_DEMO=0 to disable.</span>
+              <span className="text-warn">no agents checking in.</span>{' '}
+              <span className="text-muted">deploy an implant with a valid mTLS cert to begin.</span>
             </div>
           )}
 
           {data && page === 'overview' && (
             <div className="space-y-3 min-w-0">
-              <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
                 {data.metrics.map((m) => (
                   <MetricCard key={m.key} metric={m} />
                 ))}
               </div>
-              <TrafficChart traffic={data.traffic} />
               <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
             </div>
           )}
 
-          {data && page === 'nodes' && (
-            <NodesTable nodes={filtered} resetKey={query} pageSize={25} showFilters title="All Nodes" onTerminal={execEnabled ? setTerminalNode : undefined} />
-          )}
+          {data && page === 'listeners' && execEnabled && <Listeners nodes={filtered} onTerminal={setTerminalNode} />}
+
+          {page === 'fleet' && execEnabled && <FleetDiagnostics />}
 
           {data && page === 'deployments' && (
             <div className="space-y-3 min-w-0">
@@ -119,10 +112,6 @@ export default function Dashboard({ session, onLogout, onExpired }) {
               <DeploymentsTable deployments={data.deployments} />
             </div>
           )}
-
-          {data && page === 'listeners' && execEnabled && <Listeners nodes={filtered} onTerminal={setTerminalNode} />}
-
-          {page === 'fleet' && execEnabled && <FleetDiagnostics />}
 
           {data && page === 'settings' && <SettingsPanel subnet={data.subnet} />}
         </main>

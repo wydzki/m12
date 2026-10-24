@@ -1,13 +1,12 @@
-import { LayoutDashboard, Server, Rocket, Radio, Settings, Search, LogOut, Terminal, Ear } from 'lucide-react'
+import { Crosshair, Server, Ear, Radio, Rocket, Settings, Search, LogOut, Terminal } from 'lucide-react'
 import { Logo, Avatar, Segmented } from './ui.jsx'
 import { WORKSPACES } from '../constants.js'
 
 export const PAGES = [
-  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'nodes', label: 'Nodes', icon: Server },
+  { id: 'overview', label: 'Sessions', icon: Crosshair },
   { id: 'listeners', label: 'Listeners', icon: Ear, exec: true },
   { id: 'fleet', label: 'MIPS C2', icon: Radio, exec: true },
-  { id: 'deployments', label: 'Deploys', icon: Rocket },
+  { id: 'deployments', label: 'Payloads', icon: Rocket },
   { id: 'settings', label: 'Config', icon: Settings },
 ]
 
@@ -27,7 +26,7 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted" />
           <input
             className="w-full rounded border border-line bg-page outline-none pl-9 pr-3 py-1.5 text-[13px] font-mono text-ink placeholder:text-muted focus:border-accent"
-            placeholder="search nodes, IPs, regions..."
+            placeholder="search agents..."
             value={query}
             onChange={(e) => onQuery(e.target.value)}
           />
@@ -49,6 +48,8 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
 
 export function Sidebar({ page, onPage, nodes, subnet, live, demo, execEnabled }) {
   const count = (s) => nodes.filter((n) => n.status === s).length
+  const total = nodes.length
+  const callbacks = count('healthy') + count('scanning')
 
   return (
     <aside className="hidden md:block w-48 shrink-0">
@@ -77,35 +78,28 @@ export function Sidebar({ page, onPage, nodes, subnet, live, demo, execEnabled }
 
         <div className="card p-3 text-[12px] font-mono space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-bright font-semibold">fleet</span>
+            <span className="text-bright font-semibold">agents</span>
             <span
               className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wider uppercase ${
                 live ? 'text-ok bg-ok/10 border border-ok/20' : 'text-muted bg-raised border border-line'
               }`}
-              title={
-                live
-                  ? 'Receiving telemetry from mTLS-authenticated nodes'
-                  : demo
-                    ? 'No nodes connected — showing sample data'
-                    : 'No nodes connected yet'
-              }
             >
               <span className={`size-1.5 rounded-full bg-current ${live ? 'animate-pulse' : ''}`} />
               {live ? 'LIVE' : demo ? 'DEMO' : 'IDLE'}
             </span>
           </div>
           <div className="flex justify-between text-muted">
-            src <span className="text-ink">{live ? 'mTLS' : subnet ?? '—'}</span>
+            auth <span className="text-ink">{live ? 'mTLS' : '—'}</span>
           </div>
           <div className="border-t border-line my-1" />
           <div className="flex justify-between text-muted">
-            online <span className="text-ok font-semibold">{count('healthy')}</span>
+            callbacks <span className="text-ok font-semibold">{callbacks}</span>
           </div>
           <div className="flex justify-between text-muted">
-            active <span className="text-blue font-semibold">{count('scanning')}</span>
+            dead <span className="text-bad font-semibold">{count('offline')}</span>
           </div>
           <div className="flex justify-between text-muted">
-            offline <span className="text-bad font-semibold">{count('offline')}</span>
+            total <span className="text-bright font-semibold">{total}</span>
           </div>
         </div>
       </div>

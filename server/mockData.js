@@ -17,31 +17,6 @@ function rng(seed) {
   }
 }
 
-function series(seed, base, amp, n = 24, round = 1) {
-  const r = rng(seed)
-  let v = base
-  return Array.from({ length: n }, (_, i) => {
-    v += (r() - 0.5) * amp
-    v = Math.max(base - amp * 2, Math.min(base + amp * 2, v))
-    return { i, v: Number(v.toFixed(round)) }
-  })
-}
-
-function trafficSeries(seed, n, label) {
-  const inb = rng(seed)
-  const out = rng(seed + 7)
-  return Array.from({ length: n }, (_, i) => {
-    const wave = Math.sin((i / n) * Math.PI * 2) * 0.35 + 1
-    return {
-      t: label(i),
-      inbound: Math.round((180 + inb() * 120) * wave),
-      outbound: Math.round((70 + out() * 60) * wave),
-    }
-  })
-}
-
-const pad = (n) => String(n).padStart(2, '0')
-const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 const REGIONS = ['LAN-East', 'LAN-Core', 'LAN-West', 'DMZ', 'LAN-North', 'LAN-South']
 
 // /22 holds 1016 usable hosts (192.168.8.1 .. 192.168.11.254), enough for MAX_NODES.
@@ -119,37 +94,24 @@ function liveActivity(nodes) {
     })
 }
 
-// Flat zero series for the "no nodes yet" state.
-const flat = (n = 24) => Array.from({ length: n }, (_, i) => ({ i, v: 0 }))
-
 function emptyDashboard(now) {
-  const metrics = [
-    { key: 'instances', label: 'Active Instances', value: '0', unit: 'nodes', note: '>waiting for first check-in', tone: 'good', spark: flat() },
-    { key: 'latency', label: 'Network Latency', value: '—', unit: 'ms p50', note: '>no data yet', tone: 'good', spark: flat() },
-    { key: 'deploys', label: 'Deployment Status', value: '—', unit: '', note: '>no deploys yet', tone: 'good', spark: flat() },
-    { key: 'errors', label: 'Error Rate', value: '0', unit: '%', note: '>no nodes reporting', tone: 'good', spark: flat() },
+  const metrics = c2Metrics([], false)
+  return { subnet: '—', live: false, demo: false, total: 0, nodes: [], events: [], deployments: [], metrics }
+}
+
+function c2Metrics(nodes, live) {
+  const total = nodes.length
+  const offline = nodes.filter((n) => n.status === 'offline').length
+  const callbacks = total - offline
+  const recent = nodes.filter((n) => n.status !== 'offline' && Date.now() - n.lastSeen < 120_000).length
+  return [
+    { key: 'sessions', label: 'Active Sessions', value: `${callbacks}`, unit: `/ ${total}`, note: `>${recent} checked in <2m`, tone: 'good' },
+    { key: 'shells', label: 'Reverse Shells', value: `${callbacks}`, unit: 'available', note: callbacks ? '>ready for tasking' : '>no agents online', tone: callbacks ? 'good' : 'dim' },
+    { key: 'queued', label: 'Broadcast', value: live ? 'ready' : '—', unit: '', note: live ? '>all agents taskable' : '>no agents connected', tone: live ? 'good' : 'dim' },
+    { key: 'dead', label: 'Dead Agents', value: `${offline}`, unit: '', note: offline ? `>${offline} not checking in` : '>all agents alive', tone: offline ? 'bad' : 'good' },
   ]
-  const zero = (n, label) => Array.from({ length: n }, (_, i) => ({ t: label(i), inbound: 0, outbound: 0 }))
-  const traffic = {
-    '1h': zero(12, (i) => `-${55 - i * 5}m`),
-    '24h': zero(24, (i) => `${pad(i)}:00`),
-    '7d': zero(7, (i) => DAYS[(new Date(now).getDay() + i + 1) % 7]),
-  }
-  return { subnet: '—', live: false, demo: false, total: 0, nodes: [], events: [], deployments: [], metrics, traffic }
 }
 
-// Derive latency from node-reported metrics (the agent can send { metrics: { latency: <ms> } }).
-function liveLatency(nodes) {
-  const vals = nodes.filter((n) => n.status !== 'offline' && n.metrics?.latency != null).map((n) => n.metrics.latency)
-  if (vals.length === 0) return null
-  vals.sort((a, b) => a - b)
-  return vals[Math.floor(vals.length * 0.5)]
-}
-
-// count: size of the demo fleet when no live data. liveNodes: real telemetry
-// (from the mTLS ingest store) which, when present, becomes the fleet.
-// demo: when false and no nodes have reported, show an empty dashboard instead
-// of the sample fleet.
 export function buildDashboard(count = DEFAULT_NODES, liveNodes = null, demo = true) {
   const now = Date.now()
   const minsAgo = (m) => now - m * MIN
@@ -160,47 +122,10 @@ export function buildDashboard(count = DEFAULT_NODES, liveNodes = null, demo = t
   const nodes = live ? liveNodes.slice(0, MAX_NODES) : makeNodes(Math.max(1, Math.min(MAX_NODES, count | 0)), now)
   const total = nodes.length
   const offlineCount = nodes.filter((n) => n.status === 'offline').length
-  const scanningCount = nodes.filter((n) => n.status === 'scanning').length
   const online = total - offlineCount
 
   const { events, deployments } = live ? { events: liveActivity(nodes), deployments: [] } : mockActivity(nodes, online, minsAgo)
+  const metrics = c2Metrics(nodes, live || demo)
 
-  const errorRate = ((offlineCount / total) * 100).toFixed(1)
-
-  if (live) {
-    const p50 = liveLatency(nodes)
-    const latVal = p50 != null ? p50.toFixed(1) : '—'
-    const latUnit = p50 != null ? 'ms p50' : ''
-    const latNote = p50 != null ? `>from ${nodes.filter((n) => n.metrics?.latency != null).length} reporting nodes` : '>agent not reporting latency'
-    const flatSpark = Array.from({ length: 24 }, (_, i) => ({ i, v: 0 }))
-    const metrics = [
-      { key: 'instances', label: 'Active Nodes', value: `${online}`, unit: `/ ${total}`, note: `>${scanningCount} scanning now`, tone: 'good', spark: flatSpark },
-      { key: 'latency', label: 'Network Latency', value: latVal, unit: latUnit, note: latNote, tone: 'good', spark: flatSpark },
-      { key: 'deploys', label: 'Deployment Status', value: '—', unit: '', note: '>deployments land here', tone: 'good', spark: flatSpark },
-      { key: 'errors', label: 'Error Rate', value: errorRate, unit: '%', note: `>${offlineCount} nodes unreachable`, tone: offlineCount ? 'bad' : 'good', spark: flatSpark },
-    ]
-    const checkins = nodes.filter((n) => n.status !== 'offline').length
-    const zeroTraffic = (n, label) => Array.from({ length: n }, (_, i) => ({ t: label(i), inbound: checkins, outbound: 0 }))
-    const traffic = {
-      '1h': zeroTraffic(12, (i) => `-${55 - i * 5}m`),
-      '24h': zeroTraffic(24, (i) => `${pad(i)}:00`),
-      '7d': zeroTraffic(7, (i) => DAYS[(new Date(now).getDay() + i + 1) % 7]),
-    }
-    return { subnet: 'live', live: true, demo: false, total, nodes, events, deployments, metrics, traffic }
-  }
-
-  const metrics = [
-    { key: 'instances', label: 'Active Instances', value: `${online}`, unit: `/ ${total}`, note: `>${scanningCount} scanning now`, tone: 'good', spark: series(11, online, Math.max(1, online * 0.05), 24, 0) },
-    { key: 'latency', label: 'Network Latency', value: '4.2', unit: 'ms p50', note: '>-0.6ms vs 1h ago', tone: 'good', spark: series(23, 4.5, 1.4) },
-    { key: 'deploys', label: 'Deployment Status', value: '92', unit: '% success', note: '>11 of 12 succeeded today', tone: 'good', spark: series(37, 92, 4, 24, 0) },
-    { key: 'errors', label: 'Error Rate', value: errorRate, unit: '%', note: `>${offlineCount} nodes unreachable`, tone: offlineCount ? 'bad' : 'good', spark: series(41, Number(errorRate) || 0.5, 0.5, 24, 2) },
-  ]
-
-  const traffic = {
-    '1h': trafficSeries(101, 12, (i) => `-${55 - i * 5}m`),
-    '24h': trafficSeries(202, 24, (i) => `${pad(i)}:00`),
-    '7d': trafficSeries(303, 7, (i) => DAYS[(new Date(now).getDay() + i + 1) % 7]),
-  }
-
-  return { subnet: SUBNET, live: false, demo: true, total, nodes, events, deployments, metrics, traffic }
+  return { subnet: live ? 'live' : SUBNET, live, demo: !live && demo, total, nodes, events, deployments, metrics }
 }
