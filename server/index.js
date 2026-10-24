@@ -46,12 +46,12 @@ const config = {
   offlineAfterMin: Math.max(1, Number(env.NODE_OFFLINE_AFTER_MIN || 10) || 10),
   demo: env.M12_DEMO !== '0', // show sample fleet until real nodes report; set M12_DEMO=0 to disable
   // Remote command execution on nodes (diagnostics). OFF unless explicitly enabled.
-  execEnabled: env.M12_EXEC_ENABLED === '1',
+  execEnabled: (env.M12_EXEC_ENABLED || '').trim() === '1',
   // Optional: comma-separated exact commands that may be queued. Empty = any command.
   execAllowlist: (env.M12_EXEC_ALLOWLIST || '').split(',').map((s) => s.trim()).filter(Boolean),
 
   // Build endpoint (compiles the MIPS agent). Off unless explicitly enabled.
-  buildEnabled: env.M12_BUILD_ENABLED === '1',
+  buildEnabled: (env.M12_BUILD_ENABLED || '').trim() === '1',
   buildCross: env.M12_BUILD_CROSS || 'mips-linux-gnu-',
   buildDest: env.M12_BUILD_DEST || '/srv/tftp/m12-agent',
   buildToken: env.M12_BUILD_TOKEN || null,
@@ -389,6 +389,7 @@ server.maxRequestsPerSocket = 200
 
 server.listen(config.port, config.host, () => {
   log(`m12 listening on ${tls ? 'https' : 'http'}://${config.host}:${config.port}`)
+  log(`features: exec=${config.execEnabled} build=${config.buildEnabled} demo=${config.demo}`)
 })
 
 // mTLS telemetry ingest listener (only authorized nodes can reach application code)
