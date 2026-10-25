@@ -249,6 +249,23 @@ static int run_command(const char *cmd, char *out, size_t cap, int *exit_code) {
 
 /* ---------- TLS ---------- */
 
+/* Read a whole file into a malloc'd buffer. Returns bytes read, 0 on failure.
+   The buffer is NUL-terminated (PEM needs it; harmless for DER). */
+static size_t read_file(const char *path, unsigned char **out) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return 0;
+  fseek(f, 0, SEEK_END);
+  long len = ftell(f);
+  if (len <= 0) { fclose(f); return 0; }
+  fseek(f, 0, SEEK_SET);
+  *out = malloc((size_t)len + 1);
+  if (!*out) { fclose(f); return 0; }
+  size_t n = fread(*out, 1, (size_t)len, f);
+  fclose(f);
+  (*out)[n] = 0;
+  return n + 1; /* include NUL — mbedtls_x509_crt_parse expects it for PEM */
+}
+
 static int setup_tls(void) {
   int ret;
   const char *pers = "m12-agent";
@@ -265,7 +282,10 @@ static int setup_tls(void) {
   /* CA compiled in as DER. mbedtls_x509_crt_parse auto-detects DER vs PEM. */
   if ((ret = mbedtls_x509_crt_parse(&g_cacert, embedded_ca, embedded_ca_len)) != 0) { emit_err("embedded ca", ret); return -1; }
 #else
-  if ((ret = mbedtls_x509_crt_parse_file(&g_cacert, g_cfg.ca)) != 0) { emit_err(g_cfg.ca, ret); return -1; }
+  { unsigned char *buf = NULL; size_t len = read_file(g_cfg.ca, &buf);
+    if (!len) { fprintf(stderr, "m12: cannot read %s\n", g_cfg.ca); return -1; }
+    ret = mbedtls_x509_crt_parse(&g_cacert, buf, len); free(buf);
+    if (ret != 0) { emit_err(g_cfg.ca, ret); return -1; } }
 #endif
 
   /* --- this node's cert + key (its identity) --- */
@@ -274,11 +294,16 @@ static int setup_tls(void) {
   if ((ret = mbedtls_x509_crt_parse(&g_clicert, embedded_cert, embedded_cert_len)) != 0) { emit_err("embedded cert", ret); return -1; }
   if ((ret = mbedtls_pk_parse_key(&g_pkey, embedded_key, embedded_key_len, NULL, 0, mbedtls_ctr_drbg_random, &g_ctr_drbg)) != 0) { emit_err("embedded key", ret); return -1; }
 #else
-  /* From disk (requires stock mbedTLS config with FS_IO + PEM_PARSE_C). */
   const char *cert_src = g_cfg.identity[0] ? g_cfg.identity : g_cfg.cert;
   const char *key_src  = g_cfg.identity[0] ? g_cfg.identity : g_cfg.key;
-  if ((ret = mbedtls_x509_crt_parse_file(&g_clicert, cert_src)) != 0) { emit_err(cert_src, ret); return -1; }
-  if ((ret = mbedtls_pk_parse_keyfile(&g_pkey, key_src, NULL, mbedtls_ctr_drbg_random, &g_ctr_drbg)) != 0) { emit_err(key_src, ret); return -1; }
+  { unsigned char *buf = NULL; size_t len = read_file(cert_src, &buf);
+    if (!len) { fprintf(stderr, "m12: cannot read %s\n", cert_src); return -1; }
+    ret = mbedtls_x509_crt_parse(&g_clicert, buf, len); free(buf);
+    if (ret != 0) { emit_err(cert_src, ret); return -1; } }
+  { unsigned char *buf = NULL; size_t len = read_file(key_src, &buf);
+    if (!len) { fprintf(stderr, "m12: cannot read %s\n", key_src); return -1; }
+    ret = mbedtls_pk_parse_key(&g_pkey, buf, len, NULL, 0, mbedtls_ctr_drbg_random, &g_ctr_drbg); free(buf);
+    if (ret != 0) { emit_err(key_src, ret); return -1; } }
 #endif
   if ((ret = mbedtls_ssl_config_defaults(&g_conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0) { emit_err("config_defaults", ret); return -1; }
   mbedtls_ssl_conf_authmode(&g_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
