@@ -624,31 +624,43 @@ int main(int argc, char **argv) {
 
   load_config();
 
-  if (setup_tls() != 0) { cleanup_tls(); return 1; }
-
-  fprintf(stderr, "m12-agent: %s:%s interval=%ds node=%s\n",
-          g_cfg.host, g_cfg.port, interval, g_cfg.node[0] ? g_cfg.node : "(cert CN)");
-
   for (;;) {
-    char nodefld[96];
-    node_field(nodefld, sizeof(nodefld));
-    static char tjson[320];
-    snprintf(tjson, sizeof(tjson),
-             "{%s\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
-             nodefld, status, g_cfg.region, cpu_percent(), mem_percent());
-
-    static char resp[RESP_CAP];
-    int code = https_request(HTTP_PATH, tjson, resp, sizeof(resp));
-    if (code == 200) {
-      process_commands(http_body(resp));
-    } else {
-      fprintf(stderr, "check-in failed: HTTP %d\n", code);
+    if (setup_tls() != 0) {
+      cleanup_tls();
+      fprintf(stderr, "m12-agent: TLS init failed, retrying in %ds\n", interval);
+      sleep(interval);
+      continue;
     }
 
+    fprintf(stderr, "m12-agent: %s:%s interval=%ds node=%s\n",
+            g_cfg.host, g_cfg.port, interval, g_cfg.node[0] ? g_cfg.node : "(cert CN)");
+
+    int failures = 0;
+    while (failures < 30) {
+      char nodefld[96];
+      node_field(nodefld, sizeof(nodefld));
+      static char tjson[320];
+      snprintf(tjson, sizeof(tjson),
+               "{%s\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
+               nodefld, status, g_cfg.region, cpu_percent(), mem_percent());
+
+      static char resp[RESP_CAP];
+      int code = https_request(HTTP_PATH, tjson, resp, sizeof(resp));
+      if (code == 200) {
+        process_commands(http_body(resp));
+        failures = 0;
+      } else {
+        fprintf(stderr, "check-in failed: HTTP %d (%d/30)\n", code, ++failures);
+      }
+
+      sleep(interval);
+    }
+
+    fprintf(stderr, "m12-agent: 30 consecutive failures, reinitializing TLS\n");
+    cleanup_tls();
     sleep(interval);
   }
 
-  cleanup_tls();
   return 0;
 }
 
