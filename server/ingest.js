@@ -227,8 +227,9 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, rev
     },
   )
 
-  // Drop clients whose cert fails verification without logging a stack per attempt.
-  server.on('tlsClientError', () => {})
+  server.on('tlsClientError', (err) => {
+    log(`ingest tls-error: ${err?.message || err}`)
+  })
   server.headersTimeout = 10_000
   server.requestTimeout = 15_000
   server.keepAliveTimeout = 5_000
