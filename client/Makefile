@@ -131,12 +131,12 @@ endif
 # on a tiny single-shot agent.
 SIZEFLAGS        = $(ARCHFLAGS) -flto -fno-stack-protector \
                    -fno-asynchronous-unwind-tables -fno-unwind-tables \
-                   -fomit-frame-pointer -fno-ident
+                   -fomit-frame-pointer -fno-ident -fno-pie
 
 CFLAGS          ?= -Os -ffunction-sections -fdata-sections
 AGENT_CFLAGS     = $(CFLAGS) $(SIZEFLAGS) $(AGENT_CPPFLAGS)
 LDFLAGS          = -static -flto -Wl,--gc-sections -Wl,--as-needed \
-                   -Wl,--build-id=none -s
+                   -Wl,--build-id=none -s -no-pie
 LIBS             = -lmbedtls -lmbedx509 -lmbedcrypto
 
 BIN             ?= m12-agent
