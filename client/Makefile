@@ -89,41 +89,10 @@ else
 MBEDTLS_CFLAGS  += -DMBEDTLS_SSL_IN_CONTENT_LEN=4096 -DMBEDTLS_SSL_OUT_CONTENT_LEN=4096
 endif
 
-# Fleet flow (one image for many routers): EMBED_CA=1 bakes in ONLY the
-# shared CA (public, not secret), so the flashed binary is byte-for-byte identical
-# on every node. Each device carries its own identity in a single node.pem (cert
-# + key) — the build defaults the identity path to node.pem. Per-node identity and
-# per-node revocation are preserved; you just flash + drop one small file.
-#
-#   make EMBED_CA=1 MINIMAL_TLS=1 MIPS_CROSS=mipsel-linux-musl- CA=../pki/ca.crt
-#
-# EMBED_CERTS=1 instead bakes in all three (CA+cert+key) -> a fully standalone
-# binary with nothing else to copy to the device. Two ways to use it:
-#   * per-node  : a different cert per router -> one build per router, each keeps
-#                 its own identity + revocation (binary differs between routers).
-#   * shared/fleet: ONE cert used for the whole fleet -> a single identical binary
-#                 flashed to every router, nothing else on the device. Simplest to
-#                 deploy, but all routers share one identity: they appear as a
-#                 single node on the dashboard and revoke affects them all. The
-#                 binary embeds that shared private key, so treat it as a secret.
-#
-#   # shared/fleet image (mint one cert for the whole fleet, then build once):
-#   #   ./scripts/pki.sh node-cert homelab-fleet
-#   make EMBED_CERTS=1 MINIMAL_TLS=1 CA=../pki/ca.crt \
-#        CERT=../pki/homelab-fleet.crt KEY=../pki/homelab-fleet.key
-EMBED_HDR       := embedded_certs.h
-CA              ?=
-CERT            ?=
-KEY             ?=
-ifdef EMBED_CERTS
-override AGENT_CPPFLAGS += -DEMBED_CERTS
-EMBED_DEP       := $(EMBED_HDR)
-EMBED_GEN_ARGS   = "$(CA)" "$(CERT)" "$(KEY)"
-else ifdef EMBED_CA
-override AGENT_CPPFLAGS += -DEMBED_CA -DIDENTITY_PATH='"node.pem"'
-EMBED_DEP       := $(EMBED_HDR)
-EMBED_GEN_ARGS   = "$(CA)"
-endif
+# Certs are always compiled in via embedded_certs.h (CA + client cert + key).
+# The binary is fully self-contained — no cert files needed on the device.
+# To update the embedded certs, edit client/embedded_certs.h directly or
+# regenerate it:  scripts/embed-certs.sh pki/ca.crt pki/node.crt pki/node.key > client/embedded_certs.h
 
 # Size-oriented codegen, applied to the agent object (ARCHFLAGS pins MIPS32).
 # -flto lets dead code be dropped across the agent + mbedTLS; drop it if your
@@ -177,16 +146,7 @@ fresh:
 # Faster, but trusts the existing lib — use `make`/`make fresh` when in doubt.
 quick: $(BIN)
 
-# Regenerate the embedded-certs header whenever the source PEMs change (only a
-# prerequisite when EMBED_CA / EMBED_CERTS is set, so a normal build needs none).
-$(EMBED_HDR): $(CA) $(CERT) $(KEY)
-	@test -n "$(CA)" || { echo "embedding needs CA= (path to pki/ca.crt)"; exit 1; }
-	@test -z "$(EMBED_CERTS)" || { test -n "$(CERT)" && test -n "$(KEY)"; } || \
-	    { echo "EMBED_CERTS=1 also requires CERT= and KEY= (this node's cert + key)"; exit 1; }
-	../scripts/embed-certs.sh $(EMBED_GEN_ARGS) > $@
-	@echo "generated $@"
-
-$(BIN): client.c $(EMBED_DEP) $(MBEDTLS_LIB)
+$(BIN): client.c embedded_certs.h $(MBEDTLS_LIB)
 	$(CC) $(AGENT_CFLAGS) $< -o $@ \
 	    -I"$(MBEDTLS)/include" -L"$(MBEDTLS)/library" \
 	    $(LDFLAGS) $(LIBS)
@@ -233,7 +193,7 @@ gz: $(BIN)
 	@printf 'compressed  '; ls -l $(BIN).gz | awk '{printf "%s (%d bytes)\n", $$5, $$5}'
 
 clean:
-	rm -f $(BIN) $(BIN).gz $(BIN_BE) $(BIN_BE).gz $(BIN_LE) $(BIN_LE).gz $(EMBED_HDR)
+	rm -f $(BIN) $(BIN).gz $(BIN_BE) $(BIN_BE).gz $(BIN_LE) $(BIN_LE).gz
 
 distclean: clean
 	rm -rf "$(MBEDTLS)" "$(MBEDTLS_TARBALL)"
