@@ -34,6 +34,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/entropy.h"
@@ -266,10 +267,34 @@ static size_t read_file(const char *path, unsigned char **out) {
   return n + 1; /* include NUL — mbedtls_x509_crt_parse expects it for PEM */
 }
 
+/* Custom entropy source: read ONLY /dev/urandom.  Bypasses mbedtls's default
+   platform poll which may try getrandom() (ENOSYS on kernel <3.17) or open
+   /dev/random (missing on some Broadcom/EcoNet firmware). */
+static int urandom_poll(void *data, unsigned char *output, size_t len, size_t *olen) {
+  static int fd = -1;
+  (void)data;
+  *olen = 0;
+  if (fd < 0 && (fd = open("/dev/urandom", O_RDONLY)) < 0)
+    return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+  size_t off = 0;
+  while (off < len) {
+    ssize_t n = read(fd, output + off, len - off);
+    if (n <= 0) {
+      if (n < 0 && errno == EINTR) continue;
+      return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+    }
+    off += (size_t)n;
+  }
+  *olen = len;
+  return 0;
+}
+
 static int setup_tls(void) {
   int ret;
   const char *pers = "m12-agent";
   mbedtls_entropy_init(&g_entropy);
+  mbedtls_entropy_add_source(&g_entropy, urandom_poll, NULL, 32,
+                             MBEDTLS_ENTROPY_SOURCE_STRONG);
   mbedtls_ctr_drbg_init(&g_ctr_drbg);
   mbedtls_x509_crt_init(&g_cacert);
   mbedtls_x509_crt_init(&g_clicert);

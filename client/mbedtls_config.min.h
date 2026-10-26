@@ -44,7 +44,8 @@
 /* NET_C omitted: client.c uses inline POSIX sockets (~30 lines) instead
  * of the mbedTLS net_sockets module, saving ~2 KB. */
 
-/* ---- RNG / entropy (Linux reads /dev/urandom) ---- */
+/* ---- RNG / entropy ---- */
+#define MBEDTLS_NO_PLATFORM_ENTROPY   /* agent registers its own /dev/urandom source */
 #define MBEDTLS_ENTROPY_C
 #define MBEDTLS_CTR_DRBG_C
 

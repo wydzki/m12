@@ -65,7 +65,8 @@ MBEDTLS_TARBALL  = mbedtls-$(MBEDTLS_VERSION).tar.bz2
 MBEDTLS_URL      = https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$(MBEDTLS_VERSION)/$(MBEDTLS_TARBALL)
 
 # Shared compiler flags for the mbedTLS library build.
-MBEDTLS_CFLAGS   = -Os $(ARCHFLAGS) -ffunction-sections -fdata-sections
+MBEDTLS_CFLAGS   = -Os $(ARCHFLAGS) -ffunction-sections -fdata-sections \
+                   -DMBEDTLS_NO_PLATFORM_ENTROPY
 
 # MINIMAL_TLS=1 compiles mbedTLS (and the agent) against mbedtls_config.min.h,
 # which enables ONLY TLS 1.2 + ECDHE-ECDSA-AES128-GCM-SHA256 + P-256. This is the
