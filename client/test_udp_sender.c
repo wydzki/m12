@@ -7,8 +7,9 @@
  *
  * Expected: ~50K pps, ~25 MB/s, loopback loss ~0.
  */
-#define _POSIX_C_SOURCE 200112L
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
+#include <sys/time.h>
 #include <stdint.h>
 #include <inttypes.h>
 #include <stdatomic.h>
