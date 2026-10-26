@@ -1,5 +1,5 @@
 import { Search, LogOut } from 'lucide-react'
-import { Logo, Avatar } from './ui.jsx'
+import { Logo } from './ui.jsx'
 
 export const PAGES = [
   { id: 'overview', label: 'Dashboard' },
@@ -15,7 +15,7 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
   return (
     <header className="sticky top-0 z-20 bg-surface border-b border-line">
       <div className="flex items-center gap-0 overflow-x-auto">
-        <div className="flex items-center gap-2 px-4 py-2.5 border-r border-line shrink-0">
+        <div className="flex items-center gap-2 px-3 py-1.5 border-r border-line shrink-0">
           <Logo size="sm" />
         </div>
 
@@ -23,7 +23,7 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
           <button
             key={id}
             onClick={() => onPage(id)}
-            className={`shrink-0 px-4 py-2.5 text-[12px] font-mono font-semibold uppercase tracking-wider border-r border-line transition-colors cursor-pointer ${
+            className={`shrink-0 px-3 py-1.5 text-[11px] font-mono font-semibold uppercase tracking-wider border-r border-line cursor-pointer ${
               id === page
                 ? 'bg-raised text-accent'
                 : 'text-muted hover:text-ink hover:bg-raised/50'
@@ -37,9 +37,9 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
 
         <div className="hidden sm:flex items-center gap-2 px-3 shrink-0">
           <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted" />
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted" />
             <input
-              className="w-48 rounded border border-line bg-page outline-none pl-8 pr-3 py-1.5 text-[12px] font-mono text-ink placeholder:text-muted focus:border-accent"
+              className="w-44 border border-line bg-page outline-none pl-7 pr-2 py-1 text-[11px] font-mono text-ink placeholder:text-muted focus:border-accent"
               placeholder="search..."
               value={query}
               onChange={(e) => onQuery(e.target.value)}
@@ -48,12 +48,11 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
         </div>
 
         <div className="flex items-center gap-2 px-3 border-l border-line shrink-0">
-          <span className="hidden sm:block font-mono text-[11px] text-muted">
+          <span className="hidden sm:block font-mono text-[10px] text-muted">
             <span className="text-accent">@</span>{session.name}
           </span>
-          <Avatar name={session.name} size="size-6" />
-          <button onClick={onLogout} title="Log out" className="p-1 rounded text-muted hover:bg-raised hover:text-ink cursor-pointer">
-            <LogOut className="size-3.5" />
+          <button onClick={onLogout} title="Log out" className="p-1 text-muted hover:bg-raised hover:text-ink cursor-pointer">
+            <LogOut className="size-3" />
           </button>
         </div>
       </div>
@@ -69,10 +68,10 @@ export function StatusPanel({ nodes, live, demo, execEnabled, buildEnabled }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <div className="card overflow-hidden">
-        <div className="px-4 py-2.5 border-b border-line bg-raised/30">
-          <h3 className="font-mono font-semibold text-[12px] text-bright uppercase tracking-wider">Configuration</h3>
+        <div className="px-3 py-1.5 border-b border-line bg-raised/30">
+          <h3 className="font-mono font-semibold text-[10px] text-accent uppercase tracking-wider">Configuration</h3>
         </div>
-        <div className="divide-y divide-line text-[13px] font-mono">
+        <div className="divide-y divide-line text-[11px] font-mono">
           <Row label="Status" value={live ? 'LIVE' : demo ? 'DEMO' : 'IDLE'} tone={live ? 'ok' : 'muted'} />
           <Row label="Auth method" value={live ? 'mTLS' : '—'} />
           <Row label="Exec enabled" value={execEnabled ? 'True' : 'False'} tone={execEnabled ? 'ok' : 'muted'} />
@@ -83,14 +82,14 @@ export function StatusPanel({ nodes, live, demo, execEnabled, buildEnabled }) {
       </div>
 
       <div className="card overflow-hidden">
-        <div className="px-4 py-2.5 border-b border-line bg-raised/30">
-          <h3 className="font-mono font-semibold text-[12px] text-bright uppercase tracking-wider">Fleet Status</h3>
+        <div className="px-3 py-1.5 border-b border-line bg-raised/30">
+          <h3 className="font-mono font-semibold text-[10px] text-accent uppercase tracking-wider">Fleet Status</h3>
         </div>
-        <div className="px-4 py-3 space-y-3">
+        <div className="px-3 py-2 space-y-2">
           <ProgressRow label="Online" value={callbacks} max={total || 1} color="ok" />
           <ProgressRow label="Active" value={count('scanning')} max={total || 1} color="blue" />
           <ProgressRow label="Offline" value={count('offline')} max={total || 1} color="bad" />
-          <div className="border-t border-line pt-3 space-y-2 text-[12px] font-mono">
+          <div className="border-t border-line pt-2 space-y-1 text-[11px] font-mono">
             <div className="flex justify-between">
               <span className="text-muted">Callbacks</span>
               <span className="text-ok font-semibold">{callbacks}</span>
@@ -113,7 +112,7 @@ export function StatusPanel({ nodes, live, demo, execEnabled, buildEnabled }) {
 function Row({ label, value, tone }) {
   const cls = tone === 'ok' ? 'text-ok' : tone === 'bad' ? 'text-bad' : tone === 'muted' ? 'text-muted' : 'text-ink'
   return (
-    <div className="flex items-center justify-between px-4 py-2">
+    <div className="flex items-center justify-between px-3 py-1">
       <span className="text-muted">{label}</span>
       <span className={`font-semibold ${cls}`}>{value}</span>
     </div>
@@ -125,12 +124,12 @@ function ProgressRow({ label, value, max, color }) {
   const bg = color === 'ok' ? 'bg-ok' : color === 'bad' ? 'bg-bad' : color === 'blue' ? 'bg-blue' : 'bg-accent'
   return (
     <div>
-      <div className="flex justify-between text-[12px] font-mono mb-1">
+      <div className="flex justify-between text-[11px] font-mono mb-0.5">
         <span className="text-muted">{label}</span>
         <span className="text-ink">{pct}%</span>
       </div>
-      <div className="h-2 bg-raised rounded-full overflow-hidden border border-line">
-        <div className={`h-full rounded-full ${bg} transition-all`} style={{ width: `${pct}%` }} />
+      <div className="h-1.5 bg-raised overflow-hidden border border-line">
+        <div className={`h-full ${bg}`} style={{ width: `${pct}%` }} />
       </div>
     </div>
   )

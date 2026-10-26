@@ -321,6 +321,20 @@ async function handleApi(req, res, pathname) {
     return true
   }
 
+  // Remove client (not gated by exec)
+  if (req.method === 'DELETE' && pathname.startsWith('/api/nodes/')) {
+    const match = pathname.match(/^\/api\/nodes\/([^/]+)$/)
+    if (!match) return json(res, 404, { error: 'Not found.' })
+    if (!sameOrigin(req)) return json(res, 403, { error: 'Forbidden.' })
+    const s = requireSession(req, res)
+    if (!s) return
+    const id = decodeURIComponent(match[1])
+    if (!NODE_ID_RE.test(id)) return json(res, 400, { error: 'Invalid client id.' })
+    const removed = telemetry.remove(id)
+    log(`client removed id=${id} by=${s.user}`)
+    return json(res, 200, { ok: true, removed })
+  }
+
   // Dynamic exec routes (only when exec is enabled)
   if (pathname.startsWith('/api/nodes/') || pathname.startsWith('/api/fleet/')) {
     if (!execStore) return json(res, 404, { error: 'Not found.' })

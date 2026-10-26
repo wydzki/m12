@@ -1,75 +1,108 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { StatusBadge, Pager, Segmented, ago } from './ui.jsx'
 
-const th = 'px-3 py-2.5 text-left text-[11px] font-mono font-semibold text-muted uppercase tracking-wider whitespace-nowrap cursor-pointer select-none hover:text-ink transition-colors'
-const td = 'px-3 py-2.5 border-t border-line whitespace-nowrap'
+const th = 'px-2 py-1.5 text-left text-[10px] font-mono font-semibold text-muted uppercase tracking-wider whitespace-nowrap cursor-pointer select-none hover:text-ink'
+const td = 'px-2 py-1.5 border-t border-line whitespace-nowrap'
 
 const FILTERS = ['all', 'healthy', 'scanning', 'offline'].map((f) => ({ value: f, label: f }))
 
 const COLUMNS = [
   { key: 'id', label: 'ID', sortKey: (n) => n.id },
-  { key: 'connection', label: 'Connection', sortKey: (n) => n.connection ?? '' },
+  { key: 'connection', label: 'Conn', sortKey: (n) => n.connection ?? '' },
   { key: 'externalIp', label: 'External IP', sortKey: (n) => n.externalIp ?? '' },
   { key: 'region', label: 'Region', sortKey: (n) => n.region ?? '' },
   { key: 'ip', label: 'Intranet IP', sortKey: (n) => n.ip },
   { key: 'user', label: 'User', sortKey: (n) => n.user ?? '' },
-  { key: 'hostname', label: 'Host Name', sortKey: (n) => n.hostname ?? '' },
-  { key: 'systemType', label: 'System Type', sortKey: (n) => n.systemType ?? '' },
-  { key: 'processName', label: 'Process', sortKey: (n) => n.processName ?? '' },
+  { key: 'hostname', label: 'Host', sortKey: (n) => n.hostname ?? '' },
+  { key: 'systemType', label: 'System', sortKey: (n) => n.systemType ?? '' },
+  { key: 'processName', label: 'Proc', sortKey: (n) => n.processName ?? '' },
   { key: 'status', label: 'Status', sortKey: (n) => n.status },
-  { key: 'heartbeats', label: 'Heartbeat', sortKey: (n) => n.heartbeats ?? 0 },
+  { key: 'heartbeats', label: 'HB', sortKey: (n) => n.heartbeats ?? 0 },
 ]
 
 function SortArrow({ active, dir }) {
   return (
     <span className={`inline-flex flex-col ml-1 leading-none ${active ? 'text-accent' : 'text-muted/40'}`}>
-      <span className={`text-[8px] ${active && dir === 'asc' ? 'text-accent' : ''}`}>&#9650;</span>
-      <span className={`text-[8px] -mt-0.5 ${active && dir === 'desc' ? 'text-accent' : ''}`}>&#9660;</span>
+      <span className={`text-[7px] ${active && dir === 'asc' ? 'text-accent' : ''}`}>&#9650;</span>
+      <span className={`text-[7px] -mt-0.5 ${active && dir === 'desc' ? 'text-accent' : ''}`}>&#9660;</span>
     </span>
   )
 }
 
-function OpMenu({ node, onTerminal }) {
-  const [open, setOpen] = useState(false)
+function ContextMenu({ x, y, node, onShell, onCheckDir, onRemove, onClose }) {
+  useEffect(() => {
+    const close = () => onClose()
+    window.addEventListener('click', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [onClose])
+
+  const items = [
+    { label: '> Shell', fn: () => onShell?.(node.id), ok: node.status !== 'offline' && !!onShell },
+    { label: '> Check Directory', fn: () => onCheckDir?.(node.id), ok: node.status !== 'offline' && !!onCheckDir },
+    { label: '> Drop File', fn: null, ok: false },
+    { label: '> Upload File', fn: null, ok: false },
+    { sep: true },
+    { label: '> Remove', fn: () => onRemove?.(node.id), ok: !!onRemove, danger: true },
+  ]
 
   return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className="px-2 py-1 text-muted hover:text-ink text-[16px] leading-none rounded hover:bg-raised transition-colors"
-      >
-        &middot;&middot;&middot;
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-20 bg-surface border border-line rounded shadow-lg py-1 min-w-[120px]">
-            {onTerminal && node.status !== 'offline' && (
-              <button
-                onClick={() => { onTerminal(node.id); setOpen(false) }}
-                className="w-full text-left px-3 py-1.5 text-[12px] font-mono text-ink hover:bg-raised transition-colors"
-              >
-                shell
-              </button>
-            )}
-            <button
-              onClick={() => setOpen(false)}
-              className="w-full text-left px-3 py-1.5 text-[12px] font-mono text-muted hover:bg-raised hover:text-ink transition-colors"
-            >
-              details
-            </button>
-          </div>
-        </>
+    <div
+      className="fixed z-50 bg-surface border border-accent/30 py-1 min-w-[180px] font-mono text-[12px] shadow-[0_2px_8px_rgba(0,0,0,0.5)]"
+      style={{ left: Math.min(x, window.innerWidth - 200), top: Math.min(y, window.innerHeight - 200) }}
+    >
+      <div className="px-3 py-1 text-[10px] text-accent uppercase tracking-wider border-b border-line mb-1">
+        {node.id}
+      </div>
+      {items.map((item, i) =>
+        item.sep ? (
+          <div key={i} className="border-t border-line my-1" />
+        ) : (
+          <button
+            key={i}
+            onClick={(e) => {
+              e.stopPropagation()
+              if (item.ok) {
+                item.fn()
+                onClose()
+              }
+            }}
+            disabled={!item.ok}
+            className={`w-full text-left px-3 py-1 ${
+              !item.ok
+                ? 'text-muted/30 cursor-default'
+                : item.danger
+                  ? 'text-bad hover:bg-bad/10 cursor-pointer'
+                  : 'text-ink hover:bg-accent/10 hover:text-accent cursor-pointer'
+            }`}
+          >
+            {item.label}
+            {!item.ok && !item.danger ? ' [soon]' : ''}
+          </button>
+        ),
       )}
     </div>
   )
 }
 
-export function NodesTable({ nodes, resetKey, pageSize = 12, showFilters = false, title = 'Clients', onTerminal }) {
+export function NodesTable({
+  nodes,
+  resetKey,
+  pageSize = 15,
+  showFilters = false,
+  title = 'Clients',
+  onTerminal,
+  onCheckDir,
+  onRemoveNode,
+}) {
   const [page, setPage] = useState(0)
   const [filter, setFilter] = useState('all')
   const [sortCol, setSortCol] = useState(null)
   const [sortDir, setSortDir] = useState('asc')
+  const [ctx, setCtx] = useState(null)
 
   const rows = filter === 'all' ? nodes : nodes.filter((n) => n.status === filter)
 
@@ -94,19 +127,24 @@ export function NodesTable({ nodes, resetKey, pageSize = 12, showFilters = false
   useEffect(() => setPage(0), [resetKey, filter])
 
   function toggleSort(key) {
-    if (sortCol === key) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
-    } else {
+    if (sortCol === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else {
       setSortCol(key)
       setSortDir('asc')
     }
   }
 
+  const handleContext = useCallback((e, node) => {
+    e.preventDefault()
+    setCtx({ x: e.clientX, y: e.clientY, node })
+  }, [])
+
   return (
     <section className="card overflow-hidden">
-      <div className="flex flex-wrap items-center gap-2 px-3 pt-3 pb-2">
-        <h2 className="font-mono font-semibold text-[13px] text-bright uppercase tracking-wider">{title}</h2>
-        <span className="text-muted text-[12px] font-mono">{rows.length}</span>
+      <div className="flex flex-wrap items-center gap-2 px-2 pt-2 pb-1">
+        <h2 className="font-mono font-semibold text-[11px] text-accent uppercase tracking-wider">{title}</h2>
+        <span className="text-muted text-[11px] font-mono">[{rows.length}]</span>
+        <span className="text-muted/30 text-[10px] font-mono ml-1">right-click for options</span>
         {showFilters && (
           <div className="ml-auto">
             <Segmented options={FILTERS} value={filter} onChange={setFilter} />
@@ -115,7 +153,7 @@ export function NodesTable({ nodes, resetKey, pageSize = 12, showFilters = false
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-[13px] font-mono">
+        <table className="w-full text-[11px] font-mono">
           <thead>
             <tr className="bg-raised/50">
               {COLUMNS.map((col) => (
@@ -124,45 +162,41 @@ export function NodesTable({ nodes, resetKey, pageSize = 12, showFilters = false
                   <SortArrow active={sortCol === col.key} dir={sortDir} />
                 </th>
               ))}
-              <th className="px-3 py-2.5 text-left text-[11px] font-mono font-semibold text-muted uppercase tracking-wider whitespace-nowrap">
-                Operation
-              </th>
             </tr>
           </thead>
           <tbody>
             {visible.map((n) => (
-              <tr key={n.id} className="hover:bg-raised/60 transition-colors">
+              <tr
+                key={n.id}
+                className="hover:bg-accent/5 cursor-default"
+                onContextMenu={(e) => handleContext(e, n)}
+              >
                 <td className={td}>
-                  <span className="font-semibold text-bright">{n.id}</span>
+                  <span className="font-semibold text-accent">{n.id}</span>
                 </td>
                 <td className={td}>
-                  <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-raised border border-line text-muted">
+                  <span className="text-[9px] px-1 py-0.5 bg-raised border border-line text-muted">
                     {n.connection ?? 'mTLS'}
                   </span>
                 </td>
                 <td className={`${td} text-muted`}>{n.externalIp ?? '—'}</td>
                 <td className={`${td} text-muted`}>{n.region}</td>
-                <td className={`${td} text-accent`}>{n.ip}</td>
+                <td className={`${td} text-accent/70`}>{n.ip}</td>
                 <td className={`${td} text-muted`}>{n.user ?? 'root'}</td>
                 <td className={`${td} text-muted`}>{n.hostname ?? '—'}</td>
-                <td className={td}>
-                  <span className="text-muted">{n.systemType ?? '—'}</span>
-                </td>
+                <td className={`${td} text-muted`}>{n.systemType ?? '—'}</td>
                 <td className={`${td} text-muted`}>{n.processName ?? 'm12-agent'}</td>
                 <td className={td}>
                   <StatusBadge status={n.status} />
                 </td>
                 <td className={td}>
-                  <HeartbeatBadge count={n.heartbeats ?? 0} status={n.status} />
-                </td>
-                <td className={td}>
-                  <OpMenu node={n} onTerminal={onTerminal} />
+                  <HBBadge count={n.heartbeats ?? 0} status={n.status} />
                 </td>
               </tr>
             ))}
             {visible.length === 0 && (
               <tr>
-                <td colSpan={COLUMNS.length + 1} className={`${td} text-center py-8 text-muted`}>
+                <td colSpan={COLUMNS.length} className={`${td} text-center py-4 text-muted`}>
                   no clients match
                 </td>
               </tr>
@@ -172,18 +206,28 @@ export function NodesTable({ nodes, resetKey, pageSize = 12, showFilters = false
       </div>
 
       {pages > 1 && <Pager page={current} pages={pages} onPage={setPage} />}
+
+      {ctx && (
+        <ContextMenu
+          x={ctx.x}
+          y={ctx.y}
+          node={ctx.node}
+          onShell={onTerminal}
+          onCheckDir={onCheckDir}
+          onRemove={onRemoveNode}
+          onClose={() => setCtx(null)}
+        />
+      )}
     </section>
   )
 }
 
-function HeartbeatBadge({ count, status }) {
-  const isOnline = status !== 'offline'
+function HBBadge({ count, status }) {
+  const on = status !== 'offline'
   return (
     <span
-      className={`inline-flex items-center justify-center min-w-[28px] h-[22px] rounded-full text-[11px] font-mono font-semibold border ${
-        isOnline && count > 0
-          ? 'text-ok border-ok/30 bg-ok/10'
-          : 'text-muted border-line bg-raised'
+      className={`inline-flex items-center justify-center min-w-[22px] h-[16px] text-[9px] font-mono font-semibold border ${
+        on && count > 0 ? 'text-ok border-ok/30 bg-ok/10' : 'text-muted border-line bg-raised'
       }`}
     >
       {count}
@@ -194,9 +238,11 @@ function HeartbeatBadge({ count, status }) {
 export function DeploymentsTable({ deployments }) {
   return (
     <section className="card overflow-hidden">
-      <h2 className="font-mono font-semibold text-[13px] text-bright uppercase tracking-wider px-3 pt-3 pb-2">Deployments</h2>
+      <h2 className="font-mono font-semibold text-[11px] text-accent uppercase tracking-wider px-2 pt-2 pb-1">
+        Deployments
+      </h2>
       <div className="overflow-x-auto">
-        <table className="w-full text-[13px] font-mono">
+        <table className="w-full text-[11px] font-mono">
           <thead>
             <tr className="bg-raised/50">
               <th className={th}>ID</th>
@@ -210,7 +256,7 @@ export function DeploymentsTable({ deployments }) {
           </thead>
           <tbody>
             {deployments.map((d) => (
-              <tr key={d.id} className="hover:bg-raised/60 transition-colors">
+              <tr key={d.id} className="hover:bg-accent/5">
                 <td className={`${td} font-semibold text-bright`}>{d.id}</td>
                 <td className={td}>
                   {d.payload} <span className="text-muted">@{d.version}</span>
@@ -221,12 +267,12 @@ export function DeploymentsTable({ deployments }) {
                 </td>
                 <td className={`${td} text-muted`}>{d.by}</td>
                 <td className={`${td} text-muted`}>{d.duration}</td>
-                <td className={`${td} text-muted text-[12px]`}>{ago(d.at)}</td>
+                <td className={`${td} text-muted text-[10px]`}>{ago(d.at)}</td>
               </tr>
             ))}
             {deployments.length === 0 && (
               <tr>
-                <td colSpan={7} className={`${td} text-center py-8 text-muted`}>
+                <td colSpan={7} className={`${td} text-center py-4 text-muted`}>
                   no deployments yet
                 </td>
               </tr>

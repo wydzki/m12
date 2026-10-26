@@ -25,4 +25,5 @@ export const api = {
   runCommand: (id, command) => request(`/api/nodes/${encodeURIComponent(id)}/exec`, { method: 'POST', body: { command } }),
   fleetExec: (command) => request('/api/fleet/exec', { method: 'POST', body: { command } }),
   fleetTask: (taskId) => request(`/api/fleet/exec/${encodeURIComponent(taskId)}`),
+  removeNode: (id) => request(`/api/nodes/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }

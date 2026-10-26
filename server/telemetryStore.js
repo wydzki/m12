@@ -37,6 +37,10 @@ export class TelemetryStore {
     })
   }
 
+  remove(nodeId) {
+    return this.map.delete(nodeId)
+  }
+
   has(nodeId) {
     return this.map.has(nodeId)
   }

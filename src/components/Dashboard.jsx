@@ -19,6 +19,21 @@ export default function Dashboard({ session, onLogout, onExpired }) {
   const [buildEnabled, setBuildEnabled] = useState(false)
   const [execEnabled, setExecEnabled] = useState(false)
   const [terminalNode, setTerminalNode] = useState(null)
+  const [terminalInitCmd, setTerminalInitCmd] = useState(null)
+
+  function openTerminal(id, cmd) {
+    setTerminalNode(id)
+    setTerminalInitCmd(cmd || null)
+  }
+
+  function handleCheckDir(id) {
+    openTerminal(id, 'ls -la /')
+  }
+
+  async function handleRemoveNode(id) {
+    const r = await api.removeNode(id)
+    if (r.ok) load()
+  }
 
   useEffect(() => {
     api
@@ -105,7 +120,13 @@ export default function Dashboard({ session, onLogout, onExpired }) {
               execEnabled={execEnabled}
               buildEnabled={buildEnabled}
             />
-            <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
+            <NodesTable
+              nodes={filtered}
+              resetKey={query}
+              onTerminal={execEnabled ? (id) => openTerminal(id) : undefined}
+              onCheckDir={execEnabled ? handleCheckDir : undefined}
+              onRemoveNode={handleRemoveNode}
+            />
           </div>
         )}
 
@@ -124,7 +145,13 @@ export default function Dashboard({ session, onLogout, onExpired }) {
       </main>
 
       <BottomNav page={page} onPage={setPage} execEnabled={execEnabled} />
-      {terminalNode && <NodeTerminal nodeId={terminalNode} onClose={() => setTerminalNode(null)} />}
+      {terminalNode && (
+        <NodeTerminal
+          nodeId={terminalNode}
+          initialCommand={terminalInitCmd}
+          onClose={() => { setTerminalNode(null); setTerminalInitCmd(null) }}
+        />
+      )}
     </div>
   )
 }
