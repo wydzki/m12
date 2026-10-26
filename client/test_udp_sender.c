@@ -113,7 +113,8 @@ int main(void)
                                      (double)DURATION_SEC);
 
     /* Let listener drain the last packets */
-    usleep(200000); /* 200ms */
+    struct timespec drain = { .tv_sec = 0, .tv_nsec = 200000000 };
+    nanosleep(&drain, NULL);
     atomic_store_explicit(&g_listener_run, 0, memory_order_relaxed);
     pthread_join(ltid, NULL);
 
