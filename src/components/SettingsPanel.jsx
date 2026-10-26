@@ -31,7 +31,7 @@ export default function SettingsPanel({ subnet }) {
             <option value="300">300s</option>
           </select>
         </Field>
-        <Field label="offline threshold" hint="missed check-ins before a node is marked offline">
+        <Field label="offline threshold" hint="missed check-ins before a client is marked offline">
           <input type="number" className="field max-w-32" defaultValue={10} />
         </Field>
         <Field label="webhook">
@@ -39,10 +39,10 @@ export default function SettingsPanel({ subnet }) {
         </Field>
         <div className="flex flex-col gap-2 text-[13px] font-mono">
           <label className="flex items-center gap-2 text-ink cursor-pointer">
-            <input type="checkbox" className="accent-accent size-3.5" defaultChecked /> auto-deploy to new nodes
+            <input type="checkbox" className="accent-accent size-3.5" defaultChecked /> auto-deploy to new clients
           </label>
           <label className="flex items-center gap-2 text-ink cursor-pointer">
-            <input type="checkbox" className="accent-accent size-3.5" /> hide offline nodes
+            <input type="checkbox" className="accent-accent size-3.5" /> hide offline clients
           </label>
         </div>
         <div className="flex items-center gap-3 pt-2">

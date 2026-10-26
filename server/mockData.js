@@ -18,14 +18,18 @@ function rng(seed) {
 }
 
 const REGIONS = ['LAN-East', 'LAN-Core', 'LAN-West', 'DMZ', 'LAN-North', 'LAN-South']
+const HOSTNAMES = ['OpenWrt', 'DD-WRT', 'Padavan', 'LEDE', 'Tomato', 'Gargoyle', 'OpenWrt', 'FreshTomato']
+const SYSTEM_TYPES = ['Linux_mips', 'Linux_mipsel', 'Linux_mips', 'Linux_mipsel', 'Linux_arm', 'Linux_mips', 'Linux_mipsel', 'Linux_mips']
+const USERS = ['root', 'root', 'root', 'admin', 'root', 'root']
 
 // /22 holds 1016 usable hosts (192.168.8.1 .. 192.168.11.254), enough for MAX_NODES.
 const SUBNET = '192.168.8.0/22'
 const ipForHost = (i) => `192.168.${8 + Math.floor((i - 1) / 254)}.${((i - 1) % 254) + 1}`
+const extIpForHost = (i, r) => `${10 + Math.floor(r() * 90)}.${Math.floor(r() * 255)}.${Math.floor(r() * 255)}.${1 + Math.floor(r() * 254)}`
 
 function makeNodes(count, now) {
   const r = rng(1337)
-  const width = Math.max(2, String(count).length) // 2-digit ids for small fleets, wider for big ones
+  const width = Math.max(2, String(count).length)
   const nodes = []
   for (let i = 1; i <= count; i++) {
     const roll = r()
@@ -33,12 +37,20 @@ function makeNodes(count, now) {
     if (roll > 0.95) status = 'offline'
     else if (roll > 0.85) status = 'scanning'
     const lastSeen = status === 'offline' ? now - (30 + Math.floor(r() * 600)) * MIN : now - Math.floor(r() * 10 * MIN)
+    const heartbeats = status === 'offline' ? Math.floor(r() * 5) : 10 + Math.floor(r() * 200)
     nodes.push({
       id: `node-mips-${String(i).padStart(width, '0')}`,
       ip: ipForHost(i),
+      externalIp: extIpForHost(i, r),
       region: REGIONS[i % REGIONS.length],
       status,
       lastSeen,
+      connection: 'mTLS',
+      user: USERS[i % USERS.length],
+      hostname: HOSTNAMES[i % HOSTNAMES.length],
+      systemType: SYSTEM_TYPES[i % SYSTEM_TYPES.length],
+      processName: 'm12-agent',
+      heartbeats,
     })
   }
   return nodes
@@ -55,14 +67,14 @@ function mockActivity(nodes, online, minsAgo) {
   const b = pick('healthy', 1)
   const s1 = pick('scanning', 0)
   const events = [
-    ev(0.3, 'auth', `Node ${pick('healthy', 0).ip} authenticated.`),
+    ev(0.3, 'auth', `Client ${pick('healthy', 0).ip} authenticated.`),
     ev(1, 'deploy', `Payload telemetry-agent@2.4.1 deployed to ${b.id}.`),
     ev(2, 'scan', `Port scan started on ${s1.ip} (${s1.id}).`),
-    ev(4, 'auth', `Node ${pick('healthy', 2).ip} authenticated.`),
+    ev(4, 'auth', `Client ${pick('healthy', 2).ip} authenticated.`),
     ev(12, 'warn', 'Latency spike on LAN-West: 38ms (threshold 25ms).'),
     ev(18, 'fail', `Deployment dep-0139 to ${pick('offline', 0).id} failed: host unreachable.`),
     ev(47, 'offline', `${pick('offline', 1).id} (${pick('offline', 1).ip}) stopped responding.`),
-    ev(95, 'deploy', `Config bundle cfg-2026.10.22 rolled out to ${online} nodes.`),
+    ev(95, 'deploy', `Config bundle cfg-2026.10.22 rolled out to ${online} clients.`),
     ev(185, 'offline', `${pick('offline', 2).id} marked offline.`),
   ]
   const deployments = [
@@ -70,7 +82,7 @@ function mockActivity(nodes, online, minsAgo) {
     { id: 'dep-0141', payload: 'telemetry-agent', version: '2.4.1', target: pick('healthy', 3).id, status: 'success', by: 'zki', at: minsAgo(7), duration: '22s' },
     { id: 'dep-0140', payload: 'scanner-core', version: '0.9.3', target: s1.id, status: 'running', by: 'm12d', at: minsAgo(9), duration: '—' },
     { id: 'dep-0139', payload: 'telemetry-agent', version: '2.4.1', target: pick('offline', 0).id, status: 'failed', by: 'zki', at: minsAgo(18), duration: '30s' },
-    { id: 'dep-0138', payload: 'cfg-2026.10.22', version: 'bundle', target: `${online} nodes`, status: 'success', by: 'm12d', at: minsAgo(95), duration: '1m 48s' },
+    { id: 'dep-0138', payload: 'cfg-2026.10.22', version: 'bundle', target: `${online} clients`, status: 'success', by: 'm12d', at: minsAgo(95), duration: '1m 48s' },
     { id: 'dep-0137', payload: 'scanner-core', version: '0.9.2', target: pick('scanning', 1).id, status: 'success', by: 'm12d', at: minsAgo(240), duration: '19s' },
   ]
   return { events, deployments }
@@ -106,9 +118,9 @@ function c2Metrics(nodes, live) {
   const recent = nodes.filter((n) => n.status !== 'offline' && Date.now() - n.lastSeen < 120_000).length
   return [
     { key: 'sessions', label: 'Active Sessions', value: `${callbacks}`, unit: `/ ${total}`, note: `>${recent} checked in <2m`, tone: 'good' },
-    { key: 'shells', label: 'Reverse Shells', value: `${callbacks}`, unit: 'available', note: callbacks ? '>ready for tasking' : '>no agents online', tone: callbacks ? 'good' : 'dim' },
-    { key: 'queued', label: 'Broadcast', value: live ? 'ready' : '—', unit: '', note: live ? '>all agents taskable' : '>no agents connected', tone: live ? 'good' : 'dim' },
-    { key: 'dead', label: 'Dead Agents', value: `${offline}`, unit: '', note: offline ? `>${offline} not checking in` : '>all agents alive', tone: offline ? 'bad' : 'good' },
+    { key: 'shells', label: 'Reverse Shells', value: `${callbacks}`, unit: 'available', note: callbacks ? '>ready for tasking' : '>no clients online', tone: callbacks ? 'good' : 'dim' },
+    { key: 'queued', label: 'Broadcast', value: live ? 'ready' : '—', unit: '', note: live ? '>all clients taskable' : '>no clients connected', tone: live ? 'good' : 'dim' },
+    { key: 'dead', label: 'Dead Clients', value: `${offline}`, unit: '', note: offline ? `>${offline} not checking in` : '>all clients alive', tone: offline ? 'bad' : 'good' },
   ]
 }
 

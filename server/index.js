@@ -249,7 +249,7 @@ const NODE_ID_RE = /^[a-z][a-z0-9-]{1,63}$/
 async function execRoute(req, res, nodeId) {
   const s = requireSession(req, res)
   if (!s) return
-  if (!NODE_ID_RE.test(nodeId)) return json(res, 400, { error: 'Invalid node id.' })
+  if (!NODE_ID_RE.test(nodeId)) return json(res, 400, { error: 'Invalid client id.' })
 
   if (req.method === 'GET') {
     return json(res, 200, { node: nodeId, commands: execStore.list(nodeId) })
@@ -280,7 +280,7 @@ async function fleetExecRoute(req, res) {
     return json(res, 403, { error: 'Command not in the allowlist (M12_EXEC_ALLOWLIST).' })
   }
   const nodeIds = telemetry.list().map((n) => n.id)
-  if (nodeIds.length === 0) return json(res, 409, { error: 'No nodes have reported yet.' })
+  if (nodeIds.length === 0) return json(res, 409, { error: 'No clients have reported yet.' })
   const { taskId, count } = execStore.broadcast(nodeIds, command, s.user)
   json(res, 202, { taskId, count })
 }

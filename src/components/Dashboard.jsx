@@ -59,7 +59,7 @@ export default function Dashboard({ session, onLogout, onExpired }) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!nodes || !q) return nodes ?? []
-    return nodes.filter((n) => [n.id, n.ip, n.region, n.status].some((v) => v.toLowerCase().includes(q)))
+    return nodes.filter((n) => [n.id, n.ip, n.externalIp, n.region, n.status, n.hostname, n.systemType, n.user].some((v) => v && v.toLowerCase().includes(q)))
   }, [nodes, query])
 
   function search(q) {
@@ -86,8 +86,8 @@ export default function Dashboard({ session, onLogout, onExpired }) {
           {!data && !error && <div className="card px-3 py-8 text-center text-muted font-mono text-[13px]">loading...</div>}
           {data && data.total === 0 && !data.demo && (
             <div className="card px-3 py-2.5 text-[13px] font-mono">
-              <span className="text-warn">no agents checking in.</span>{' '}
-              <span className="text-muted">deploy an implant with a valid mTLS cert to begin.</span>
+              <span className="text-warn">no clients checking in.</span>{' '}
+              <span className="text-muted">deploy a client with a valid mTLS cert to begin.</span>
             </div>
           )}
 

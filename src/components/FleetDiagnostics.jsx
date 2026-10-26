@@ -57,7 +57,7 @@ export default function FleetDiagnostics() {
           <Radio className="size-4 text-accent" /> MIPS C2
         </h2>
         <p className="text-muted text-[12px] font-mono mt-1">
-          broadcast a command to all reporting nodes. executes on next mTLS check-in.
+          broadcast a command to all reporting clients. executes on next mTLS check-in.
         </p>
         <form onSubmit={broadcast} className="mt-3 flex items-center gap-2">
           <span className="font-mono text-accent text-[13px]">$</span>
@@ -90,7 +90,7 @@ export default function FleetDiagnostics() {
             <table className="w-full text-[13px] font-mono">
               <thead>
                 <tr className="bg-raised/50">
-                  <th className={th}>Node</th>
+                  <th className={th}>Client</th>
                   <th className={th}>Status</th>
                   <th className={th}>Output</th>
                 </tr>
@@ -98,7 +98,7 @@ export default function FleetDiagnostics() {
               <tbody>
                 {task.nodes.length === 0 && (
                   <tr>
-                    <td colSpan={3} className={`${td} text-center py-6 text-muted`}>queued — waiting for nodes to check in...</td>
+                    <td colSpan={3} className={`${td} text-center py-6 text-muted`}>queued — waiting for clients to check in...</td>
                   </tr>
                 )}
                 {task.nodes.map((n) => (

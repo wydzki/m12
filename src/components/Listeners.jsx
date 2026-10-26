@@ -26,7 +26,7 @@ export default function Listeners({ nodes, onTerminal }) {
           <span className="font-mono text-[12px] text-muted">{online.length} active / {nodes.length} total</span>
         </div>
         <p className="text-muted text-[12px] font-mono mt-1">
-          nodes reporting over mTLS. select a node to open a remote shell.
+          clients reporting over mTLS. select a client to open a remote shell.
         </p>
       </section>
 
@@ -40,8 +40,10 @@ export default function Listeners({ nodes, onTerminal }) {
             <thead>
               <tr className="bg-raised/50">
                 <th className={th}></th>
-                <th className={th}>Node ID</th>
+                <th className={th}>Client ID</th>
                 <th className={th}>IP</th>
+                <th className={th}>Hostname</th>
+                <th className={th}>System</th>
                 <th className={th}>Region</th>
                 <th className={th}>Last Seen</th>
                 <th className={th}>Uptime</th>
@@ -61,6 +63,8 @@ export default function Listeners({ nodes, onTerminal }) {
                     </td>
                     <td className={`${td} font-semibold ${isOnline ? 'text-bright' : 'text-muted'}`}>{n.id}</td>
                     <td className={`${td} ${isOnline ? 'text-accent' : 'text-muted'}`}>{n.ip}</td>
+                    <td className={`${td} text-muted`}>{n.hostname ?? '—'}</td>
+                    <td className={`${td} text-muted`}>{n.systemType ?? '—'}</td>
                     <td className={`${td} text-muted`}>{n.region}</td>
                     <td className={`${td} text-muted text-[12px]`}>{ago(n.lastSeen)}</td>
                     <td className={`${td} text-muted text-[12px]`}>
@@ -83,8 +87,8 @@ export default function Listeners({ nodes, onTerminal }) {
               })}
               {rows.length === 0 && (
                 <tr>
-                  <td colSpan={onTerminal ? 7 : 6} className={`${td} text-center py-8 text-muted`}>
-                    no {filter} nodes
+                  <td colSpan={onTerminal ? 9 : 8} className={`${td} text-center py-8 text-muted`}>
+                    no {filter} clients
                   </td>
                 </tr>
               )}

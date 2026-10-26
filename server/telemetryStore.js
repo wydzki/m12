@@ -15,17 +15,24 @@ export class TelemetryStore {
   // or the device-reported id (fleet mode); see ingest.js for the trust model.
   record(nodeId, data, ip) {
     if (!this.map.has(nodeId) && this.map.size >= this.maxNodes) {
-      // evict the stalest node to bound memory under a flood of distinct CNs
       let oldest = null
       let oldestAt = Infinity
       for (const [id, n] of this.map) if (n.lastSeen < oldestAt) ((oldestAt = n.lastSeen), (oldest = id))
       if (oldest) this.map.delete(oldest)
     }
+    const prev = this.map.get(nodeId)
     this.map.set(nodeId, {
       region: data.region ?? 'unknown',
       reportedStatus: data.status ?? 'healthy',
       metrics: data.metrics ?? {},
       ip,
+      externalIp: data.externalIp ?? ip,
+      user: data.user ?? prev?.user ?? 'root',
+      hostname: data.hostname ?? prev?.hostname ?? 'unknown',
+      systemType: data.systemType ?? prev?.systemType ?? 'unknown',
+      processName: data.processName ?? prev?.processName ?? 'm12-agent',
+      connection: 'mTLS',
+      heartbeats: (prev?.heartbeats ?? 0) + 1,
       lastSeen: Date.now(),
     })
   }
@@ -46,10 +53,17 @@ export class TelemetryStore {
       .map(([id, n]) => ({
         id,
         ip: n.ip,
+        externalIp: n.externalIp ?? n.ip,
         region: n.region,
         status: now - n.lastSeen > this.offlineAfterMs ? 'offline' : n.reportedStatus,
         lastSeen: n.lastSeen,
         metrics: n.metrics,
+        connection: n.connection ?? 'mTLS',
+        user: n.user ?? 'root',
+        hostname: n.hostname ?? 'unknown',
+        systemType: n.systemType ?? 'unknown',
+        processName: n.processName ?? 'm12-agent',
+        heartbeats: n.heartbeats ?? 0,
       }))
       .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
   }

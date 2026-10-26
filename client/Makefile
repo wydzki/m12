@@ -1,14 +1,17 @@
 # m12 MIPS/ARM telemetry agent — fetch mbedTLS, build it, and link the agent.
 #
-#   make                 fresh big-endian MIPS musl build + arch verify + gzip (DEFAULT)
-#   make quick           incremental build (reuse mbedTLS lib if already built)
+#   make                 build BOTH big-endian + little-endian MIPS32 (DEFAULT)
+#   make be              big-endian only   (m12-agent-mips + .gz)
+#   make le              little-endian only (m12-agent-mipsel + .gz)
+#   make quick           incremental single build (reuse mbedTLS lib if already built)
 #   make gz              gzip the binary (for TFTP on high-latency links)
-#   make clean           remove the agent binary
+#   make clean           remove agent binaries (both endiannesses)
 #   make distclean       also remove the mbedTLS tree and tarball
 #
 # This Makefile is LOCKED to a MIPS musl toolchain: the default `make` always
-# produces a fresh, verified big-endian MIPS binary, and a stray `CROSS=` on the
-# command line (or a build button) can no longer retarget it to another arch.
+# produces fresh, verified MIPS32 binaries for both endiannesses, and a stray
+# `CROSS=` on the command line (or a build button) can no longer retarget it to
+# another arch.
 #
 # --- Build against musl, not glibc, for these devices -------------------------
 # A glibc toolchain emits:
@@ -20,8 +23,9 @@
 # so a static musl binary is genuinely self-contained — nothing to ship besides
 # the agent and its certs. This build uses a MIPS musl toolchain by default:
 #
-#   mips   (big-endian, DEFAULT)   make
-#   mipsel (little-endian)         make MIPS_CROSS=mipsel-linux-musl-
+#   mips   (big-endian)            make be
+#   mipsel (little-endian)         make le
+#   both   (DEFAULT)               make
 #
 # Prebuilt musl cross toolchains: https://musl.cc  or  https://toolchains.bootlin.com
 # (download, add its bin/ to PATH; MIPS_CROSS must resolve to <prefix>gcc).
@@ -134,16 +138,31 @@ LDFLAGS          = -static -flto -Wl,--gc-sections -Wl,--as-needed \
                    -Wl,--build-id=none -s
 LIBS             = -lmbedtls -lmbedx509 -lmbedcrypto
 
-BIN              = m12-agent
+BIN             ?= m12-agent
+BIN_BE           = m12-agent-mips
+BIN_LE           = m12-agent-mipsel
 
-.PHONY: all fresh quick verify mbedtls gz clean distclean
+.PHONY: all both be le fresh quick verify mbedtls gz clean distclean
 
-# Default: a guaranteed-fresh MIPS batch. Remove the old binary, discard any
-# previously-built mbedTLS objects (keeping the downloaded source, so no network
-# round-trip), rebuild the library AND agent with the locked MIPS toolchain, then
-# verify the result really is a big-endian MIPS binary before you stage it. This
-# is why a plain `make` can never silently reuse a stale/wrong-arch binary.
-all: fresh
+# Default: build BOTH big-endian and little-endian MIPS32 binaries. Each gets a
+# fresh mbedTLS rebuild with the matching toolchain, arch verification, and gzip.
+all: both
+
+both:
+	@echo "=== big-endian MIPS32 (mips) ==="
+	@$(MAKE) --no-print-directory fresh MIPS_CROSS=mips-linux-musl- BIN=$(BIN_BE)
+	@echo ""
+	@echo "=== little-endian MIPS32 (mipsel) ==="
+	@$(MAKE) --no-print-directory fresh MIPS_CROSS=mipsel-linux-musl- BIN=$(BIN_LE)
+	@echo ""
+	@ls -l $(BIN_BE) $(BIN_BE).gz $(BIN_LE) $(BIN_LE).gz 2>/dev/null || true
+	@echo "done: $(BIN_BE) + $(BIN_LE)"
+
+be:
+	@$(MAKE) --no-print-directory fresh MIPS_CROSS=mips-linux-musl- BIN=$(BIN_BE)
+
+le:
+	@$(MAKE) --no-print-directory fresh MIPS_CROSS=mipsel-linux-musl- BIN=$(BIN_LE)
 
 fresh:
 	rm -f $(BIN) $(BIN).gz
@@ -213,7 +232,7 @@ gz: $(BIN)
 	@printf 'compressed  '; ls -l $(BIN).gz | awk '{printf "%s (%d bytes)\n", $$5, $$5}'
 
 clean:
-	rm -f $(BIN) $(BIN).gz $(EMBED_HDR)
+	rm -f $(BIN) $(BIN).gz $(BIN_BE) $(BIN_BE).gz $(BIN_LE) $(BIN_LE).gz $(EMBED_HDR)
 
 distclean: clean
 	rm -rf "$(MBEDTLS)" "$(MBEDTLS_TARBALL)"

@@ -26,7 +26,7 @@ export function TopBar({ session, workspace, onWorkspace, query, onQuery, onLogo
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted" />
           <input
             className="w-full rounded border border-line bg-page outline-none pl-9 pr-3 py-1.5 text-[13px] font-mono text-ink placeholder:text-muted focus:border-accent"
-            placeholder="search agents..."
+            placeholder="search clients..."
             value={query}
             onChange={(e) => onQuery(e.target.value)}
           />
@@ -78,7 +78,7 @@ export function Sidebar({ page, onPage, nodes, subnet, live, demo, execEnabled }
 
         <div className="card p-3 text-[12px] font-mono space-y-1.5">
           <div className="flex items-center justify-between">
-            <span className="text-bright font-semibold">agents</span>
+            <span className="text-bright font-semibold">clients</span>
             <span
               className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wider uppercase ${
                 live ? 'text-ok bg-ok/10 border border-ok/20' : 'text-muted bg-raised border border-line'
