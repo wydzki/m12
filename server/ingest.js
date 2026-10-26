@@ -41,6 +41,10 @@ function validateTelemetry(b) {
     if (typeof b.region !== 'string' || b.region.length > 40) return null
     out.region = b.region
   }
+  if (b.v !== undefined) {
+    if (!Number.isInteger(b.v) || b.v < 0 || b.v > 255) return null
+    out.v = b.v
+  }
   if (b.metrics !== undefined) {
     const m = b.metrics
     if (typeof m !== 'object' || m === null || Array.isArray(m)) return null
@@ -137,7 +141,23 @@ function validateOutput(b) {
   return { id: b.id, output: b.output, exitCode, node }
 }
 
-export function createIngestServer({ ca, cert, key, store, execStore = null, revokedFile, log = console.log, bodyLimit = 4096, perNodePerMin = 120 }) {
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (c) => {
+      size += c.length
+      if (size > limit) {
+        req.pause()
+        reject(Object.assign(new Error('too large'), { status: 413 }))
+      } else chunks.push(c)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
+export function createIngestServer({ ca, cert, key, store, execStore = null, fileStore = null, revokedFile, ticketKey = null, log = console.log, bodyLimit = 4096, perNodePerMin = 120 }) {
   const limiter = new RateLimiter({ limit: perNodePerMin, windowMs: 60_000, maxKeys: 20_000 })
   const revoked = new RevocationList(revokedFile)
 
@@ -149,6 +169,8 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, rev
       requestCert: true,
       rejectUnauthorized: true, // reject any client without a CA-signed cert at the TLS layer
       minVersion: 'TLSv1.2',
+      sessionTimeout: 300,
+      ...(ticketKey ? { ticketKeys: ticketKey } : {}),
       maxHeaderSize: 8192,
       honorCipherOrder: true,
     },
@@ -169,8 +191,51 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, rev
           return send(403, { error: 'certificate revoked' })
         }
 
-        if (req.method !== 'POST') return send(404, { error: 'not found' })
         const path = req.url
+        const fileMatch = path.match(/^\/file\/([A-Za-z0-9_-]{1,32})$/)
+
+        if (fileMatch && fileStore) {
+          const fileId = fileMatch[1]
+          const wait = limiter.blockedFor(cn)
+          if (wait) {
+            res.setHeader('Retry-After', String(wait))
+            return send(429, { error: 'rate limit exceeded', retryAfter: wait })
+          }
+          limiter.hit(cn)
+
+          if (req.method === 'GET') {
+            const entry = fileStore.get(fileId)
+            if (!entry || !entry.data || entry.remotePath) return send(404, { error: 'file not found' })
+            log(`file download cn=${cn} id=${fileId} size=${entry.data.length}`)
+            res.writeHead(200, {
+              'Content-Type': 'application/octet-stream',
+              'Content-Length': entry.data.length,
+              'X-M12-SHA256': entry.sha256,
+              'X-M12-Path': entry.destPath,
+              'Cache-Control': 'no-store',
+            })
+            return res.end(entry.data)
+          }
+          if (req.method === 'POST') {
+            let raw
+            try {
+              raw = await readRawBody(req, 4 * 1024 * 1024)
+            } catch (e) {
+              if (e.status === 413) {
+                res.setHeader('Connection', 'close')
+                return send(413, { error: 'payload too large' })
+              }
+              return send(400, { error: 'read error' })
+            }
+            const ok = fileStore.receivePull(fileId, raw)
+            if (!ok) return send(404, { error: 'unknown pull id or already received' })
+            log(`file upload cn=${cn} id=${fileId} size=${raw.length}`)
+            return send(200, { ok: true })
+          }
+          return send(405, { error: 'method not allowed' })
+        }
+
+        if (req.method !== 'POST') return send(404, { error: 'not found' })
         if (path !== '/ingest' && !(execStore && path === '/output')) return send(404, { error: 'not found' })
 
         const wait = limiter.blockedFor(cn)
@@ -231,7 +296,7 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, rev
     log(`ingest tls-error: ${err?.message || err}`)
   })
   server.headersTimeout = 10_000
-  server.requestTimeout = 15_000
+  server.requestTimeout = 120_000
   server.keepAliveTimeout = 5_000
   server.maxRequestsPerSocket = 500
 

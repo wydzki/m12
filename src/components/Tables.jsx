@@ -16,6 +16,8 @@ const COLUMNS = [
   { key: 'hostname', label: 'Host', sortKey: (n) => n.hostname ?? '' },
   { key: 'systemType', label: 'System', sortKey: (n) => n.systemType ?? '' },
   { key: 'processName', label: 'Proc', sortKey: (n) => n.processName ?? '' },
+  { key: 'tags', label: 'Tags', sortKey: (n) => Object.keys(n.tags || {}).length },
+  { key: 'protoVersion', label: 'Proto', sortKey: (n) => n.protoVersion ?? 0 },
   { key: 'status', label: 'Status', sortKey: (n) => n.status },
   { key: 'heartbeats', label: 'HB', sortKey: (n) => n.heartbeats ?? 0 },
 ]
@@ -29,7 +31,7 @@ function SortArrow({ active, dir }) {
   )
 }
 
-function ContextMenu({ x, y, node, onShell, onCheckDir, onRemove, onClose }) {
+function ContextMenu({ x, y, node, onShell, onCheckDir, onDropFile, onPullFile, onEditTags, onRemove, onClose }) {
   useEffect(() => {
     const close = () => onClose()
     window.addEventListener('click', close)
@@ -43,8 +45,9 @@ function ContextMenu({ x, y, node, onShell, onCheckDir, onRemove, onClose }) {
   const items = [
     { label: '> Shell', fn: () => onShell?.(node.id), ok: node.status !== 'offline' && !!onShell },
     { label: '> Check Directory', fn: () => onCheckDir?.(node.id), ok: node.status !== 'offline' && !!onCheckDir },
-    { label: '> Drop File', fn: null, ok: false },
-    { label: '> Upload File', fn: null, ok: false },
+    { label: '> Drop File', fn: () => onDropFile?.(node.id), ok: node.status !== 'offline' && !!onDropFile },
+    { label: '> Pull File', fn: () => onPullFile?.(node.id), ok: node.status !== 'offline' && !!onPullFile },
+    { label: '> Edit Tags', fn: () => onEditTags?.(node.id), ok: !!onEditTags },
     { sep: true },
     { label: '> Remove', fn: () => onRemove?.(node.id), ok: !!onRemove, danger: true },
   ]
@@ -90,6 +93,9 @@ function ContextMenu({ x, y, node, onShell, onCheckDir, onRemove, onClose }) {
 
 export function NodesTable({
   nodes,
+  onDropFile,
+  onPullFile,
+  onEditTags,
   resetKey,
   pageSize = 15,
   showFilters = false,
@@ -187,6 +193,21 @@ export function NodesTable({
                 <td className={`${td} text-muted`}>{n.systemType ?? '—'}</td>
                 <td className={`${td} text-muted`}>{n.processName ?? 'm12-agent'}</td>
                 <td className={td}>
+                  <div className="flex flex-wrap gap-0.5">
+                    {Object.entries(n.tags || {}).map(([k, v]) => (
+                      <span key={k} className="text-[9px] px-1 py-0.5 bg-accent/10 text-accent border border-accent/20">
+                        {v ? `${k}=${v}` : k}
+                      </span>
+                    ))}
+                    {Object.keys(n.tags || {}).length === 0 && <span className="text-muted text-[9px]">—</span>}
+                  </div>
+                </td>
+                <td className={`${td} text-center`}>
+                  <span className={`text-[9px] px-1 py-0.5 font-semibold ${(n.protoVersion ?? 0) > 0 ? 'text-ok' : 'text-muted'}`}>
+                    v{n.protoVersion ?? 0}
+                  </span>
+                </td>
+                <td className={td}>
                   <StatusBadge status={n.status} />
                 </td>
                 <td className={td}>
@@ -214,6 +235,9 @@ export function NodesTable({
           node={ctx.node}
           onShell={onTerminal}
           onCheckDir={onCheckDir}
+          onDropFile={onDropFile}
+          onPullFile={onPullFile}
+          onEditTags={onEditTags}
           onRemove={onRemoveNode}
           onClose={() => setCtx(null)}
         />

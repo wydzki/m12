@@ -35,6 +35,54 @@ export default function Dashboard({ session, onLogout, onExpired }) {
     if (r.ok) load()
   }
 
+  function handleDropFile(id) {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      const destPath = prompt('Destination path on agent:', `/tmp/${file.name}`)
+      if (!destPath) return
+      const buf = await file.arrayBuffer()
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)))
+      const dr = await api.fleetDryRun([id], 'file_push')
+      if (!dr.ok) { alert(dr.data?.error || 'dry-run failed'); return }
+      const r = await api.filePush(destPath, b64, [id], dr.data.confirm_token)
+      if (!r.ok) alert(r.data?.error || 'push failed')
+    }
+    input.click()
+  }
+
+  async function handlePullFile(id) {
+    const remotePath = prompt('File path on agent:')
+    if (!remotePath) return
+    const dr = await api.fleetDryRun([id], 'file_pull')
+    if (!dr.ok) { alert(dr.data?.error || 'dry-run failed'); return }
+    const r = await api.filePull(remotePath, [id], dr.data.confirm_token)
+    if (!r.ok) alert(r.data?.error || 'pull failed')
+  }
+
+  async function handleEditTags(id) {
+    const r = await api.nodeTags(id)
+    const current = r.ok ? r.data?.tags || {} : {}
+    const input = prompt(
+      `Tags for ${id} (key=value, comma-separated):\n\nCurrent: ${Object.entries(current).map(([k, v]) => `${k}=${v}`).join(', ') || '(none)'}`,
+      Object.entries(current).map(([k, v]) => `${k}=${v}`).join(', '),
+    )
+    if (input === null) return
+    const tags = {}
+    for (const part of input.split(',')) {
+      const trimmed = part.trim()
+      if (!trimmed) continue
+      const eq = trimmed.indexOf('=')
+      if (eq > 0) tags[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim()
+      else tags[trimmed] = ''
+    }
+    const sr = await api.setTags(id, tags)
+    if (!sr.ok) alert(sr.data?.error || 'failed to set tags')
+    else load()
+  }
+
   useEffect(() => {
     api
       .features()
@@ -125,6 +173,9 @@ export default function Dashboard({ session, onLogout, onExpired }) {
               resetKey={query}
               onTerminal={execEnabled ? (id) => openTerminal(id) : undefined}
               onCheckDir={execEnabled ? handleCheckDir : undefined}
+              onDropFile={execEnabled ? handleDropFile : undefined}
+              onPullFile={execEnabled ? handlePullFile : undefined}
+              onEditTags={handleEditTags}
               onRemoveNode={handleRemoveNode}
             />
           </div>
@@ -132,7 +183,7 @@ export default function Dashboard({ session, onLogout, onExpired }) {
 
         {data && page === 'listeners' && execEnabled && <Listeners nodes={filtered} onTerminal={setTerminalNode} />}
 
-        {page === 'fleet' && execEnabled && <FleetDiagnostics />}
+        {page === 'fleet' && execEnabled && <FleetDiagnostics nodes={filtered} />}
 
         {data && page === 'deployments' && (
           <div className="space-y-3 min-w-0">

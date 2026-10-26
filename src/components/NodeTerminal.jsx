@@ -10,6 +10,7 @@ export default function NodeTerminal({ nodeId, initialCommand, onClose }) {
   const scrollRef = useRef(null)
   const inputRef = useRef(null)
   const sentInitial = useRef(false)
+  const opIds = useRef(new Set())
 
   async function refresh() {
     const r = await api.nodeExec(nodeId)
@@ -24,9 +25,23 @@ export default function NodeTerminal({ nodeId, initialCommand, onClose }) {
   }, [nodeId])
 
   useEffect(() => {
+    const hb = setInterval(() => {
+      for (const id of opIds.current) api.opHeartbeat(id).catch(() => {})
+    }, 15_000)
+    return () => {
+      clearInterval(hb)
+      for (const id of opIds.current) api.opClose(id).catch(() => {})
+      opIds.current.clear()
+    }
+  }, [nodeId])
+
+  useEffect(() => {
     if (initialCommand && !sentInitial.current) {
       sentInitial.current = true
-      api.runCommand(nodeId, initialCommand).then(() => refresh())
+      api.runCommand(nodeId, initialCommand).then((r) => {
+        if (r.ok && r.data?.operationId) opIds.current.add(r.data.operationId)
+        refresh()
+      })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialCommand, nodeId])
@@ -45,6 +60,7 @@ export default function NodeTerminal({ nodeId, initialCommand, onClose }) {
       const r = await api.runCommand(nodeId, cmd)
       if (!r.ok) setError(r.data?.error || `failed (${r.status})`)
       else {
+        if (r.data?.operationId) opIds.current.add(r.data.operationId)
         setCommand('')
         refresh()
       }
