@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { TopBar, Sidebar, BottomNav } from './Layout.jsx'
+import { TopBar, StatusPanel, BottomNav } from './Layout.jsx'
 import { MetricCard } from './Charts.jsx'
 import { NodesTable, DeploymentsTable } from './Tables.jsx'
 import SettingsPanel from './SettingsPanel.jsx'
@@ -76,46 +76,52 @@ export default function Dashboard({ session, onLogout, onExpired }) {
         query={query}
         onQuery={search}
         onLogout={onLogout}
+        page={page}
+        onPage={setPage}
+        execEnabled={execEnabled}
       />
 
-      <div className="flex gap-4 px-4 py-4 max-w-[1400px] mx-auto">
-        <Sidebar page={page} onPage={setPage} nodes={nodes ?? []} subnet={data?.subnet} live={data?.live} demo={data?.demo} execEnabled={execEnabled} />
+      <main className="px-4 py-4 max-w-[1600px] mx-auto space-y-3">
+        {error && <div className="card px-3 py-2.5 text-bad text-[13px] font-mono">{error}</div>}
+        {!data && !error && <div className="card px-3 py-8 text-center text-muted font-mono text-[13px]">loading...</div>}
+        {data && data.total === 0 && !data.demo && page === 'overview' && (
+          <div className="card px-3 py-2.5 text-[13px] font-mono">
+            <span className="text-warn">no clients checking in.</span>{' '}
+            <span className="text-muted">deploy a client with a valid mTLS cert to begin.</span>
+          </div>
+        )}
 
-        <main className="flex-1 min-w-0 space-y-3">
-          {error && <div className="card px-3 py-2.5 text-bad text-[13px] font-mono">{error}</div>}
-          {!data && !error && <div className="card px-3 py-8 text-center text-muted font-mono text-[13px]">loading...</div>}
-          {data && data.total === 0 && !data.demo && (
-            <div className="card px-3 py-2.5 text-[13px] font-mono">
-              <span className="text-warn">no clients checking in.</span>{' '}
-              <span className="text-muted">deploy a client with a valid mTLS cert to begin.</span>
+        {data && page === 'overview' && (
+          <div className="space-y-3 min-w-0">
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              {data.metrics.map((m) => (
+                <MetricCard key={m.key} metric={m} />
+              ))}
             </div>
-          )}
+            <StatusPanel
+              nodes={filtered}
+              live={data.live}
+              demo={data.demo}
+              execEnabled={execEnabled}
+              buildEnabled={buildEnabled}
+            />
+            <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
+          </div>
+        )}
 
-          {data && page === 'overview' && (
-            <div className="space-y-3 min-w-0">
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
-                {data.metrics.map((m) => (
-                  <MetricCard key={m.key} metric={m} />
-                ))}
-              </div>
-              <NodesTable nodes={filtered} resetKey={query} onTerminal={execEnabled ? setTerminalNode : undefined} />
-            </div>
-          )}
+        {data && page === 'listeners' && execEnabled && <Listeners nodes={filtered} onTerminal={setTerminalNode} />}
 
-          {data && page === 'listeners' && execEnabled && <Listeners nodes={filtered} onTerminal={setTerminalNode} />}
+        {page === 'fleet' && execEnabled && <FleetDiagnostics />}
 
-          {page === 'fleet' && execEnabled && <FleetDiagnostics />}
+        {data && page === 'deployments' && (
+          <div className="space-y-3 min-w-0">
+            {buildEnabled && <BuildPanel />}
+            <DeploymentsTable deployments={data.deployments} />
+          </div>
+        )}
 
-          {data && page === 'deployments' && (
-            <div className="space-y-3 min-w-0">
-              {buildEnabled && <BuildPanel />}
-              <DeploymentsTable deployments={data.deployments} />
-            </div>
-          )}
-
-          {data && page === 'settings' && <SettingsPanel subnet={data.subnet} />}
-        </main>
-      </div>
+        {data && page === 'settings' && <SettingsPanel subnet={data.subnet} />}
+      </main>
 
       <BottomNav page={page} onPage={setPage} execEnabled={execEnabled} />
       {terminalNode && <NodeTerminal nodeId={terminalNode} onClose={() => setTerminalNode(null)} />}
