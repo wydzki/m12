@@ -1769,6 +1769,7 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
                (unsigned long long)agg_eacces, (unsigned long long)agg_eperm,
                (unsigned long long)agg_enetunreach, (unsigned long long)agg_err_other);
     }
+  }
   if (first_other_errno && w > 0 && (size_t)w < out_cap) {
     w += snprintf(out + w, out_cap - w, " first_unknown_errno=%d", first_other_errno);
   }
