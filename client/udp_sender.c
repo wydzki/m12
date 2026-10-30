@@ -82,20 +82,40 @@ static void build_pkt(unsigned char *dst, const void *payload, size_t payload_le
 }
 
 #ifdef __linux__
+static int g_sendmmsg_ok = 1;
+
 static int flush_batch(int fd, struct sockaddr_in *dst,
                        struct mmsghdr *msgs, struct iovec *iovs, int count) {
-    for (int i = 0; i < count; i++) {
-        msgs[i].msg_hdr.msg_name = dst;
-        msgs[i].msg_hdr.msg_namelen = sizeof(*dst);
-        msgs[i].msg_hdr.msg_iov = &iovs[i];
-        msgs[i].msg_hdr.msg_iovlen = 1;
-        msgs[i].msg_hdr.msg_control = NULL;
-        msgs[i].msg_hdr.msg_controllen = 0;
-        msgs[i].msg_hdr.msg_flags = 0;
-        msgs[i].msg_len = 0;
+    if (g_sendmmsg_ok) {
+        for (int i = 0; i < count; i++) {
+            msgs[i].msg_hdr.msg_name = dst;
+            msgs[i].msg_hdr.msg_namelen = sizeof(*dst);
+            msgs[i].msg_hdr.msg_iov = &iovs[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+            msgs[i].msg_hdr.msg_control = NULL;
+            msgs[i].msg_hdr.msg_controllen = 0;
+            msgs[i].msg_hdr.msg_flags = 0;
+            msgs[i].msg_len = 0;
+        }
+        int sent = sendmmsg(fd, msgs, count, 0);
+        if (sent < 0 && errno == ENOSYS) {
+            g_sendmmsg_ok = 0;
+        } else {
+            return sent > 0 ? sent : 0;
+        }
     }
-    int sent = sendmmsg(fd, msgs, count, 0);
-    return sent > 0 ? sent : 0;
+    int ok = 0;
+    for (int i = 0; i < count; i++) {
+        ssize_t n = sendto(fd, iovs[i].iov_base, iovs[i].iov_len, 0,
+                           (struct sockaddr *)dst, sizeof(*dst));
+        if (n >= 0) {
+            msgs[i].msg_len = (unsigned int)n;
+            ok++;
+        } else {
+            break;
+        }
+    }
+    return ok;
 }
 #endif
 
