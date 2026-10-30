@@ -151,7 +151,7 @@ AGENT_SRCS   = client.c discovery.c udp_sender.c tcp_sender.c rate_limiter.c
 $(BIN): $(AGENT_SRCS) embedded_certs.h $(MBEDTLS_LIB)
 	$(CC) $(AGENT_CFLAGS) $(AGENT_SRCS) -o $@ \
 	    -I"$(MBEDTLS)/include" -L"$(MBEDTLS)/library" \
-	    $(LDFLAGS) $(LIBS) -lpthread
+	    $(LDFLAGS) $(LIBS) -lpthread -latomic
 	@echo "built $@  (CROSS=$(CROSS), arch=$(MIPS_ARCH)/$(MIPS_ABI), minimal_tls=$(if $(MINIMAL_TLS),yes,no))"
 	@$(CROSS)size $@ 2>/dev/null || true
 
