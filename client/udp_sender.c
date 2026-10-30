@@ -155,7 +155,9 @@ udp_stats_t udp_sender_run(udp_sender_t *s, rate_limiter_t *rl,
                 else if (errno == EMSGSIZE) st.err_emsgsize++;
                 else if (errno == EHOSTUNREACH) st.err_ehostunreach++;
                 else if (errno == EACCES) st.err_eacces++;
-                else st.err_other++;
+                else if (errno == EPERM) st.err_eperm++;
+                else if (errno == ENETUNREACH) st.err_enetunreach++;
+                else { if (!st.first_other_errno) st.first_other_errno = errno; st.err_other++; }
             }
             batch_idx = 0;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -199,7 +201,9 @@ udp_stats_t udp_sender_run(udp_sender_t *s, rate_limiter_t *rl,
                 else if (errno == EMSGSIZE) st.err_emsgsize++;
                 else if (errno == EHOSTUNREACH) st.err_ehostunreach++;
                 else if (errno == EACCES) st.err_eacces++;
-                else st.err_other++;
+                else if (errno == EPERM) st.err_eperm++;
+                else if (errno == ENETUNREACH) st.err_enetunreach++;
+                else { if (!st.first_other_errno) st.first_other_errno = errno; st.err_other++; }
             }
         }
         clock_gettime(CLOCK_MONOTONIC, &now);

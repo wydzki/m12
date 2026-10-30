@@ -20,8 +20,11 @@ typedef struct {
     uint64_t err_emsgsize;
     uint64_t err_ehostunreach;
     uint64_t err_eacces;
+    uint64_t err_eperm;
+    uint64_t err_enetunreach;
     uint64_t err_other;
-    uint64_t first_err_ns;  /* CLOCK_MONOTONIC ns of first non-EAGAIN error, 0=none */
+    int      first_other_errno;  /* first unclassified errno, for diagnostics */
+    uint64_t first_err_ns;       /* CLOCK_MONOTONIC ns of first non-EAGAIN error, 0=none */
 } udp_stats_t;
 
 /*

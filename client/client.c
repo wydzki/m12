@@ -801,7 +801,10 @@ struct load_thread_arg {
   uint64_t err_emsgsize;
   uint64_t err_ehostunreach;
   uint64_t err_eacces;
+  uint64_t err_eperm;
+  uint64_t err_enetunreach;
   uint64_t err_other;
+  int      first_other_errno;
   uint32_t retransmits;
   uint32_t rtt_us;
   uint32_t rttvar_us;
@@ -945,7 +948,10 @@ static void mode_udp_raw(load_thread_arg_t *a) {
     a->err_emsgsize     = st.err_emsgsize;
     a->err_ehostunreach = st.err_ehostunreach;
     a->err_eacces       = st.err_eacces;
+    a->err_eperm        = st.err_eperm;
+    a->err_enetunreach  = st.err_enetunreach;
     a->err_other        = st.err_other;
+    a->first_other_errno = st.first_other_errno;
     a->target_reachable = (st.err_connrefused == 0 && st.err_ehostunreach == 0);
     a->first_unreachable_ns = st.first_err_ns;
     udp_sender_destroy(&s);
@@ -1006,7 +1012,9 @@ static void mode_udp_flow_spray(load_thread_arg_t *a) {
         else if (errno == EMSGSIZE) a->err_emsgsize++;
         else if (errno == EHOSTUNREACH) a->err_ehostunreach++;
         else if (errno == EACCES) a->err_eacces++;
-        else a->err_other++;
+        else if (errno == EPERM) a->err_eperm++;
+        else if (errno == ENETUNREACH) a->err_enetunreach++;
+        else { if (!a->first_other_errno) a->first_other_errno = errno; a->err_other++; }
         consec_err++;
         ew_errs++;
         if (!a->first_unreachable_ns && consec_err >= 3) {
@@ -1168,7 +1176,9 @@ static void mode_udp_spoof_flow(load_thread_arg_t *a) {
         if (errno == ENOBUFS) a->err_enobufs++;
         else if (errno == EHOSTUNREACH) a->err_ehostunreach++;
         else if (errno == EACCES) a->err_eacces++;
-        else a->err_other++;
+        else if (errno == EPERM) a->err_eperm++;
+        else if (errno == ENETUNREACH) a->err_enetunreach++;
+        else { if (!a->first_other_errno) a->first_other_errno = errno; a->err_other++; }
         consec_err_s++;
         ew_errs_s++;
         if (!a->first_unreachable_ns && consec_err_s >= 3) {
@@ -1372,7 +1382,7 @@ static void *heartbeat_thread_fn(void *arg) {
     uint64_t total_bytes = 0, total_ops = 0;
     uint64_t total_eagain = 0, total_connrefused = 0;
     uint64_t total_enobufs = 0, total_ehostunreach = 0;
-    uint64_t total_eacces = 0, total_other = 0;
+    uint64_t total_eacces = 0, total_eperm = 0, total_enetunreach = 0, total_other = 0;
     for (int i = 0; i < ctx->threads; i++) {
       total_bytes        += ctx->args[i].total_bytes;
       total_ops          += ctx->args[i].total_ops;
@@ -1381,21 +1391,24 @@ static void *heartbeat_thread_fn(void *arg) {
       total_enobufs      += ctx->args[i].err_enobufs;
       total_ehostunreach += ctx->args[i].err_ehostunreach;
       total_eacces       += ctx->args[i].err_eacces;
+      total_eperm        += ctx->args[i].err_eperm;
+      total_enetunreach  += ctx->args[i].err_enetunreach;
       total_other        += ctx->args[i].err_other;
     }
 
-    char body[768];
+    char body[1024];
     snprintf(body, sizeof(body),
       "{%s\"id\":\"%s\",\"state\":\"running\",\"threads\":%d,"
       "\"tx_bytes\":%llu,\"tx_ops\":%llu,"
       "\"err_eagain\":%llu,\"err_connrefused\":%llu,"
       "\"err_enobufs\":%llu,\"err_ehostunreach\":%llu,"
-      "\"err_eacces\":%llu,\"err_other\":%llu}",
+      "\"err_eacces\":%llu,\"err_eperm\":%llu,\"err_enetunreach\":%llu,\"err_other\":%llu}",
       nodefld, ctx->cmd_id, ctx->threads,
       (unsigned long long)total_bytes, (unsigned long long)total_ops,
       (unsigned long long)total_eagain, (unsigned long long)total_connrefused,
       (unsigned long long)total_enobufs, (unsigned long long)total_ehostunreach,
-      (unsigned long long)total_eacces, (unsigned long long)total_other);
+      (unsigned long long)total_eacces, (unsigned long long)total_eperm,
+      (unsigned long long)total_enetunreach, (unsigned long long)total_other);
 
     char resp[256];
     https_request(HTTP_HEARTBEAT_PATH, body, resp, sizeof(resp));
@@ -1672,7 +1685,8 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
   uint64_t agg_bytes = 0, agg_ops = 0;
   uint64_t agg_eagain = 0, agg_connreset = 0, agg_pipe = 0;
   uint64_t agg_connrefused = 0, agg_enobufs = 0, agg_ehostunreach = 0;
-  uint64_t agg_eacces = 0, agg_err_other = 0;
+  uint64_t agg_eacces = 0, agg_eperm = 0, agg_enetunreach = 0, agg_err_other = 0;
+  int first_other_errno = 0;
   uint32_t agg_retransmits = 0;
   uint32_t rtt_min = 0, rtt_max = 0;
   uint64_t rtt_sum = 0, rttvar_sum = 0;
@@ -1692,7 +1706,11 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
     agg_enobufs      += args[i].err_enobufs;
     agg_ehostunreach += args[i].err_ehostunreach;
     agg_eacces       += args[i].err_eacces;
+    agg_eperm        += args[i].err_eperm;
+    agg_enetunreach  += args[i].err_enetunreach;
     agg_err_other    += args[i].err_other;
+    if (args[i].first_other_errno && !first_other_errno)
+      first_other_errno = args[i].first_other_errno;
     if (!args[i].target_reachable) any_unreachable = 1;
     if (args[i].first_unreachable_ns &&
         (!first_unreachable || args[i].first_unreachable_ns < first_unreachable))
@@ -1714,7 +1732,8 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
 
   double mbps = (double)agg_bytes * 8.0 / total_duration / 1e6;
   uint64_t total_errs = agg_eagain + agg_connreset + agg_pipe + agg_connrefused
-                      + agg_enobufs + agg_ehostunreach + agg_eacces + agg_err_other;
+                      + agg_enobufs + agg_ehostunreach + agg_eacces
+                      + agg_eperm + agg_enetunreach + agg_err_other;
   const char *mode_name = (mode >= 0 && mode < MODE_COUNT && load_modes[mode].name) ? load_modes[mode].name : "udp_raw";
 
   int w = snprintf(out, out_cap,
@@ -1743,12 +1762,15 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
                (unsigned long long)agg_pipe, (unsigned long long)agg_err_other);
     } else {
       w += snprintf(out + w, out_cap - w,
-               " errors=%llu (EAGAIN=%llu CONNREFUSED=%llu ENOBUFS=%llu EHOSTUNREACH=%llu EACCES=%llu other=%llu)",
+               " errors=%llu (EAGAIN=%llu CONNREFUSED=%llu ENOBUFS=%llu EHOSTUNREACH=%llu EACCES=%llu EPERM=%llu ENETUNREACH=%llu other=%llu)",
                (unsigned long long)total_errs,
                (unsigned long long)agg_eagain, (unsigned long long)agg_connrefused,
                (unsigned long long)agg_enobufs, (unsigned long long)agg_ehostunreach,
-               (unsigned long long)agg_eacces, (unsigned long long)agg_err_other);
+               (unsigned long long)agg_eacces, (unsigned long long)agg_eperm,
+               (unsigned long long)agg_enetunreach, (unsigned long long)agg_err_other);
     }
+  if (first_other_errno && w > 0 && (size_t)w < out_cap) {
+    w += snprintf(out + w, out_cap - w, " first_unknown_errno=%d", first_other_errno);
   }
   if (any_unreachable && w > 0 && (size_t)w < out_cap) {
     w += snprintf(out + w, out_cap - w, " target_reachable=false");
