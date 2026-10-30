@@ -1979,6 +1979,36 @@ static int derive_node_id(char *out, size_t cap) {
     }
     closedir(d);
   }
+
+  /* Fallback: derive from the device's outbound IP. Works on stripped BusyBox
+   * where /sys/class/net is absent. Opens a throwaway UDP socket to find which
+   * local IP the kernel would use to reach the internet. No packet is sent. */
+  {
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(53);
+    inet_pton(AF_INET, "8.8.8.8", &sa.sin_addr);
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s >= 0) {
+      if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
+        struct sockaddr_in local;
+        socklen_t slen = sizeof(local);
+        if (getsockname(s, (struct sockaddr *)&local, &slen) == 0) {
+          char ipstr[INET_ADDRSTRLEN];
+          inet_ntop(AF_INET, &local.sin_addr, ipstr, sizeof(ipstr));
+          close(s);
+          char buf[32];
+          int bi = 0;
+          for (const char *p = ipstr; *p && bi < (int)sizeof(buf) - 1; p++)
+            buf[bi++] = (*p == '.') ? '-' : *p;
+          buf[bi] = 0;
+          return ((size_t)snprintf(out, cap, "node-%s", buf) < cap) ? 0 : -1;
+        }
+      }
+      close(s);
+    }
+  }
   return -1;
 }
 
