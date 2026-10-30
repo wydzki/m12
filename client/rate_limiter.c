@@ -97,6 +97,21 @@ void rate_limiter_acquire(rate_limiter_t *rl, size_t n_bytes)
     }
 }
 
+void rate_limiter_set_rates(rate_limiter_t *rl, double pps, double bps)
+{
+    pthread_mutex_lock(&rl->mtx);
+    refill(rl);
+    rl->pkt_rate   = pps;
+    rl->byte_rate  = bps;
+    rl->pkt_burst  = pps * 0.1;
+    rl->byte_burst = bps * 0.1;
+    if (rl->pkt_burst  < 1.0)    rl->pkt_burst  = 1.0;
+    if (rl->byte_burst < 1500.0) rl->byte_burst = 1500.0;
+    if (rl->pkt_tokens  > rl->pkt_burst)  rl->pkt_tokens  = rl->pkt_burst;
+    if (rl->byte_tokens > rl->byte_burst) rl->byte_tokens = rl->byte_burst;
+    pthread_mutex_unlock(&rl->mtx);
+}
+
 void rate_limiter_destroy(rate_limiter_t *rl)
 {
     pthread_mutex_destroy(&rl->mtx);

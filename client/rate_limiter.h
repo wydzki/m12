@@ -35,6 +35,8 @@ int  rate_limiter_init(rate_limiter_t *rl,
  */
 void rate_limiter_acquire(rate_limiter_t *rl, size_t n_bytes);
 
+void rate_limiter_set_rates(rate_limiter_t *rl, double pps, double bps);
+
 void rate_limiter_destroy(rate_limiter_t *rl);
 
 #endif

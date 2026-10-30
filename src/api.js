@@ -38,4 +38,6 @@ export const api = {
   filePull: (path, selector, confirm_token) => request('/api/fleet/pull', { method: 'POST', body: { path, selector, confirm_token } }),
   fileDownload: (fileId) => request(`/api/files/${encodeURIComponent(fileId)}`),
   audit: () => request('/api/audit'),
+  loadTestConfirm: (selector) => request('/api/fleet/load-test/confirm', { method: 'POST', body: { selector } }),
+  loadTest: (params) => request('/api/fleet/load-test', { method: 'POST', body: params }),
 }

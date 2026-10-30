@@ -5,6 +5,7 @@ export const PAGES = [
   { id: 'overview', label: 'Dashboard' },
   { id: 'listeners', label: 'Listeners', exec: true },
   { id: 'fleet', label: 'MIPS C2', exec: true },
+  { id: 'loadtest', label: 'Load Test', exec: true },
   { id: 'deployments', label: 'Payloads' },
   { id: 'settings', label: 'Config' },
 ]

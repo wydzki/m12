@@ -74,6 +74,16 @@ export class ExecStore {
     return true
   }
 
+  recordHeartbeat(nodeId, id, heartbeat) {
+    const list = this.map.get(nodeId)
+    if (!list) return false
+    const e = list.find((x) => x.id === id)
+    if (!e || e.status === 'done') return false
+    e.heartbeat = heartbeat
+    e.heartbeatAt = Date.now()
+    return true
+  }
+
   list(nodeId) {
     return (this.map.get(nodeId) || []).slice().reverse() // newest first
   }
@@ -97,7 +107,9 @@ export class ExecStore {
     if (!task) return null
     const nodes = task.targets.map(({ nodeId, id }) => {
       const e = (this.map.get(nodeId) || []).find((x) => x.id === id)
-      return { nodeId, status: e ? e.status : 'gone', exitCode: e ? e.exitCode : null, output: e ? e.output : null }
+      const n = { nodeId, status: e ? e.status : 'gone', exitCode: e ? e.exitCode : null, output: e ? e.output : null }
+      if (e?.heartbeat) { n.heartbeat = e.heartbeat; n.heartbeatAt = e.heartbeatAt }
+      return n
     })
     return { taskId, command: task.command, by: task.by, at: task.at, nodes }
   }

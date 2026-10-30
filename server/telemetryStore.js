@@ -5,23 +5,44 @@
 const MIN = 60_000
 
 export class TelemetryStore {
-  constructor({ offlineAfterMs = 10 * MIN, maxNodes = 5000 } = {}) {
+  constructor({ offlineAfterMs = 10 * MIN, maxNodes = 5000, ttlMs = 60_000, sweepIntervalMs = 15_000 } = {}) {
     this.offlineAfterMs = offlineAfterMs
     this.maxNodes = maxNodes
-    this.map = new Map() // nodeId -> { region, reportedStatus, metrics, lastSeen, ip }
+    this.ttlMs = ttlMs
+    this.map = new Map() // nodeId -> { region, reportedStatus, metrics, lastSeen, ip, ttlExpiry }
     this.tags = new Map() // nodeId -> Map<key, value>
+    this._sweepTimer = setInterval(() => this._sweep(), sweepIntervalMs)
+    if (this._sweepTimer.unref) this._sweepTimer.unref()
+  }
+
+  _sweep() {
+    const now = Date.now()
+    for (const [id, n] of this.map) {
+      if (n.ttlExpiry && now > n.ttlExpiry) {
+        this.map.delete(id)
+        this.tags.delete(id)
+      }
+    }
   }
 
   // Called by the ingest listener. nodeId is the cert CN (per-node-cert setup)
   // or the device-reported id (fleet mode); see ingest.js for the trust model.
+  // Returns null on success, or an error string on rejection.
   record(nodeId, data, ip) {
-    if (!this.map.has(nodeId) && this.map.size >= this.maxNodes) {
+    const prev = this.map.get(nodeId)
+    // Reject rebind: live TTL from a different source IP
+    if (prev && prev.ttlExpiry && Date.now() < prev.ttlExpiry && prev.ip !== ip) {
+      return 'duplicate node id from different IP'
+    }
+
+    if (!prev && this.map.size >= this.maxNodes) {
       let oldest = null
       let oldestAt = Infinity
       for (const [id, n] of this.map) if (n.lastSeen < oldestAt) ((oldestAt = n.lastSeen), (oldest = id))
       if (oldest) this.map.delete(oldest)
     }
-    const prev = this.map.get(nodeId)
+    const now = Date.now()
+    const heartbeats = (prev?.heartbeats ?? 0) + 1
     this.map.set(nodeId, {
       region: data.region ?? 'unknown',
       reportedStatus: data.status ?? 'healthy',
@@ -34,9 +55,11 @@ export class TelemetryStore {
       processName: data.processName ?? prev?.processName ?? 'm12-agent',
       protoVersion: data.v ?? prev?.protoVersion ?? 0,
       connection: 'mTLS',
-      heartbeats: (prev?.heartbeats ?? 0) + 1,
-      lastSeen: Date.now(),
+      heartbeats,
+      lastSeen: now,
+      ttlExpiry: now + this.ttlMs,
     })
+    return null
   }
 
   remove(nodeId) {

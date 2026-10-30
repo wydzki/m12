@@ -236,14 +236,16 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, fil
         }
 
         if (req.method !== 'POST') return send(404, { error: 'not found' })
-        if (path !== '/ingest' && !(execStore && path === '/output')) return send(404, { error: 'not found' })
+        if (path !== '/ingest' && !(execStore && path === '/output') && !(execStore && path === '/heartbeat')) return send(404, { error: 'not found' })
 
-        const wait = limiter.blockedFor(cn)
-        if (wait) {
-          res.setHeader('Retry-After', String(wait))
-          return send(429, { error: 'rate limit exceeded', retryAfter: wait })
+        if (path !== '/heartbeat') {
+          const wait = limiter.blockedFor(cn)
+          if (wait) {
+            res.setHeader('Retry-After', String(wait))
+            return send(429, { error: 'rate limit exceeded', retryAfter: wait })
+          }
+          limiter.hit(cn)
         }
-        limiter.hit(cn)
 
         // command output can be larger than a telemetry check-in
         const limit = path === '/output' ? 128 * 1024 : bodyLimit
@@ -263,8 +265,26 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, fil
           if (!out) return send(422, { error: 'invalid output' })
           const nodeId = out.node || cn
           if (out.node && revoked.isRevoked(nodeId)) return send(403, { error: 'node revoked' })
+          // Log structured __m12 error replies from agents cleanly
+          if (out.output && out.exitCode !== 0) {
+            try {
+              const parsed = JSON.parse(out.output)
+              if (parsed?.__m12 === 'error') {
+                log(`agent error node=${nodeId} cmd=${out.id} reason=${parsed.reason} opcode=${parsed.opcode}`)
+              }
+            } catch { /* not JSON, normal output */ }
+          }
           // A node can only answer command ids queued for its own node id.
           const ok = execStore.recordOutput(nodeId, out.id, out.output, out.exitCode)
+          return send(ok ? 200 : 404, ok ? { ok: true } : { error: 'unknown command id for this node' })
+        }
+
+        if (path === '/heartbeat') {
+          if (typeof body !== 'object' || body === null) return send(422, { error: 'invalid heartbeat' })
+          if (typeof body.id !== 'string' || body.id.length > 32) return send(422, { error: 'invalid heartbeat id' })
+          const nodeId = (typeof body.node === 'string' && CN_RE.test(body.node)) ? body.node : cn
+          if (body.node && revoked.isRevoked(nodeId)) return send(403, { error: 'node revoked' })
+          const ok = execStore.recordHeartbeat(nodeId, body.id, body)
           return send(ok ? 200 : 404, ok ? { ok: true } : { error: 'unknown command id for this node' })
         }
 
@@ -280,7 +300,11 @@ export function createIngestServer({ ca, cert, key, store, execStore = null, fil
           return send(403, { error: 'node revoked' })
         }
 
-        store.record(nodeId, telemetry, req.socket.remoteAddress)
+        const reject = store.record(nodeId, telemetry, req.socket.remoteAddress)
+        if (reject) {
+          log(`ingest rejected node=${nodeId} ip=${req.socket.remoteAddress}: ${reject}`)
+          return send(409, { error: reject })
+        }
         // Deliver any commands queued for this node (it will run them and POST /output).
         const commands = execStore ? execStore.takePending(nodeId) : []
         send(200, { ok: true, node: nodeId, commands })
