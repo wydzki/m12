@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200112L
+#define _GNU_SOURCE
 #include "tcp_sender.h"
 #include <sys/socket.h>
 #include <sys/time.h>

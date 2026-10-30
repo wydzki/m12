@@ -1403,6 +1403,21 @@ static void *heartbeat_thread_fn(void *arg) {
   return NULL;
 }
 
+/* Portable watchdog: sleeps for timeout seconds, then cancels any still-running
+ * worker threads. Replaces pthread_timedjoin_np (glibc-only, absent in musl). */
+static void *wdog_thread_fn(void *arg) {
+  struct { pthread_t *tids; int *started; int count; double timeout; volatile int done; } *w = arg;
+  struct timespec sl = { .tv_sec = (time_t)w->timeout,
+                         .tv_nsec = (long)((w->timeout - (double)(time_t)w->timeout) * 1e9) };
+  nanosleep(&sl, NULL);
+  if (!w->done) {
+    for (int i = 0; i < w->count; i++)
+      if (w->started[i]) pthread_cancel(w->tids[i]);
+    fprintf(stderr, "load_test: watchdog fired after %.0fs\n", w->timeout);
+  }
+  return NULL;
+}
+
 static int handle_load_test(const char *json_str, int json_len, char *out, size_t out_cap, const char *cmd_id) {
   jsmn_parser p;
   jsmn_init(&p);
@@ -1640,15 +1655,19 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
   pthread_t hb_tid;
   int hb_started = (cmd_id && pthread_create(&hb_tid, NULL, heartbeat_thread_fn, &hb_ctx) == 0);
 
-  /* Watchdog: if senders haven't finished after total duration+5s, force-cancel them. */
+  /* Watchdog: if senders haven't finished after total duration+10s, force-cancel them.
+   * Uses a separate thread instead of pthread_timedjoin_np (glibc-only). */
   double total_duration = duration;
   if (phase_count > 0) {
     total_duration = 0;
     for (int i = 0; i < phase_count; i++) total_duration += phases[i].duration_s;
   }
-  struct timespec wdog_deadline;
-  clock_gettime(CLOCK_REALTIME, &wdog_deadline);
-  wdog_deadline.tv_sec += (time_t)(total_duration + 10.0);
+
+  typedef struct { pthread_t *tids; int *started; int count; double timeout; volatile int done; } wdog_ctx_t;
+  wdog_ctx_t wdog = { .tids = tids, .started = thread_started, .count = threads,
+                       .timeout = total_duration + 10.0, .done = 0 };
+  pthread_t wdog_tid;
+  int wdog_started = (pthread_create(&wdog_tid, NULL, wdog_thread_fn, &wdog) == 0);
 
   uint64_t agg_bytes = 0, agg_ops = 0;
   uint64_t agg_eagain = 0, agg_connreset = 0, agg_pipe = 0;
@@ -1663,12 +1682,7 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
 
   for (int i = 0; i < threads; i++) {
     if (!thread_started[i]) continue;
-    int rc = pthread_timedjoin_np(tids[i], NULL, &wdog_deadline);
-    if (rc != 0) {
-      pthread_cancel(tids[i]);
-      pthread_join(tids[i], NULL);
-      fprintf(stderr, "load_test: watchdog killed thread %d\n", i);
-    }
+    pthread_join(tids[i], NULL);
     agg_bytes        += args[i].total_bytes;
     agg_ops          += args[i].total_ops;
     agg_eagain       += args[i].err_eagain;
@@ -1692,6 +1706,8 @@ static int handle_load_test(const char *json_str, int json_len, char *out, size_
       if (args[i].max_rtt_us > rtt_max) rtt_max = args[i].max_rtt_us;
     }
   }
+  wdog.done = 1;
+  if (wdog_started) { pthread_cancel(wdog_tid); pthread_join(wdog_tid, NULL); }
   hb_ctx.running = 0;
   if (hb_started) pthread_join(hb_tid, NULL);
   if (shared_rl_ptr) rate_limiter_destroy(shared_rl_ptr);
